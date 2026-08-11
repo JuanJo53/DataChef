@@ -41,7 +41,7 @@ def generate_transformation_code(
     "{user_prompt}"
 
     REGLAS ESTRICTAS DE SALIDA:
-    1. Devuelve ÚNICAMENTE código executable de Python dentro de un bloque ```python ... ```.
+    1. Devuelve ÚNICAMENTE código ejecutable de Python dentro de un bloque ```python ... ```.
     2. Asume que el DataFrame ya existe en memoria bajo el nombre `df`.
     3. Asegúrate de que el resultado final procesado se mantenga/guarde en la variable `df`.
     4. NO agregues explicaciones, comentarios de texto ni introducción. Solo el código Python.
@@ -122,3 +122,57 @@ def execute_transformation_with_sandbox(
     raise RuntimeError(
         f"Error: No se pudo ejecutar la transformación tras {max_retries} intentos."
     )
+
+
+# =====================================================================
+# 📄 FUNCIÓN PARA GUARDAR EL PIPELINE REUTILIZABLE
+# =====================================================================
+def save_pipeline_script(
+    code_script: str, output_path: str = "pipeline_transformacion.py"
+):
+    """Guarda el código generado por el agente como un archivo .py reutilizable."""
+
+    header = """# ========================================================
+# PIPELINE DE TRANSFORMACIÓN AUTOMÁTICO - DATACHEF
+# Este archivo fue generado automáticamente por Action Agent.
+# Puedes ejecutarlo directamente sobre nuevos archivos CSV.
+# ========================================================
+import pandas as pd
+
+def run_pipeline(input_csv_path: str, output_csv_path: str):
+    # 1. Cargar datos crudos
+    print(f"📂 Cargando archivo: {input_csv_path}")
+    df = pd.read_csv(input_csv_path)
+
+    # 2. Aplicar Transformaciones Registradas
+"""
+
+    # Indentar correctamente cada línea del script para que encaje dentro de la función run_pipeline
+    indented_lines = []
+    for line in code_script.split("\n"):
+        if line.strip():  # Si la línea tiene contenido
+            indented_lines.append("    " + line)
+        else:  # Si es una línea en blanco
+            indented_lines.append("")
+
+    indented_code = "\n".join(indented_lines)
+
+    footer = """
+
+    # 3. Guardar resultado transformado
+    df.to_csv(output_csv_path, index=False)
+    print(f"✅ Pipeline ejecutado con éxito. Guardado en: {output_csv_path}")
+    return df
+
+if __name__ == "__main__":
+    # Cambia los nombres de los archivos según tu necesidad
+    run_pipeline("nuevos_datos_crudos.csv", "datos_limpios_resultado.csv")
+"""
+
+    full_script = header + indented_code + footer
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(full_script)
+
+    print(f"📄 ¡Pipeline reutilizable guardado con éxito en '{output_path}'!")
+    return output_path

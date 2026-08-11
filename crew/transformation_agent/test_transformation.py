@@ -2,16 +2,16 @@ import os
 import pandas as pd
 from dotenv import load_dotenv
 
-# Importación directa por estar en la misma carpeta
-from transformation_agent import execute_transformation_with_sandbox
+# Importar las dos funciones desde tu agente
+from transformation_agent import (
+    execute_transformation_with_sandbox,
+    save_pipeline_script,
+)
 
-# 1. Cargar la API Key desde el archivo .env (si existe en la raíz)
+# 1. Cargar la API Key desde el archivo .env
 load_dotenv()
 
-# Si no usas .env, puedes desmarcar la siguiente línea y colocar tu clave directamente:
-# os.environ["GOOGLE_API_KEY"] = "TU_API_KEY_DE_GOOGLE_STUDIO_AQUI"
-
-# 2. Dataset de prueba con errores intencionales
+# 2. Dataset de prueba con datos "sucios"
 data = {
     "Cliente": ["Juan", "Maria", None, "Carlos"],
     "Monto_Venta": ["$1200", "$500", "$3000", "invalido"],
@@ -40,6 +40,13 @@ try:
 
     print("=== 3. CÓDIGO PYTHON GENERADO Y VALIDADO ===")
     print(script_generado)
+    print("\n" + "=" * 40 + "\n")
+
+    # 🚀 5. Probar la generación del Pipeline Reutilizable (.py)
+    archivo_pipeline = save_pipeline_script(
+        script_generado, "pipeline_prueba.py"
+    )
+    print(f"🎉 ¡Pipeline guardado exitosamente como '{archivo_pipeline}'!")
 
 except Exception as e:
     print(f"❌ Error durante la prueba: {e}")
