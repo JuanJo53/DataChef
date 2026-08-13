@@ -1,0 +1,29 @@
+# Tema DATAChef — morado sobre fondo oscuro (alineado al logo teal->morado).
+# Se configura aqui (forma nativa de Streamlit), sin CSS.
+[theme]
+base = "dark"
+primaryColor = "#9500E5"                 # Morado vivo: botones, links, activos
+backgroundColor = "#0F0A1A"              # Fondo casi negro con matiz morado
+secondaryBackgroundColor = "#1A1330"     # Tarjetas, widgets, code, sidebar
+textColor = "#ECE6F5"                    # Texto lavanda claro (buen contraste)
+linkColor = "#C08CFF"
+codeBackgroundColor = "#1A1330"
+borderColor = "#3A2B57"
+violetColor = "#A855F7"
+
+baseRadius = "10px"
+buttonRadius = "10px"
+showWidgetBorder = true
+showSidebarBorder = true
+
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+
+# Paleta de graficos (Plotly) en degradado teal -> morado, como el logo.
+chartCategoricalColors = ["#22D3EE", "#38BDF8", "#8B5CF6", "#9500E5", "#C084FC", "#E879F9", "#7C3AED"]
+
+[theme.sidebar]
+backgroundColor = "#150E28"
+secondaryBackgroundColor = "#211840"
+textColor = "#ECE6F5"
+borderColor = "#3A2B57"
+primaryColor = "#9500E5"

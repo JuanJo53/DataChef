@@ -15,8 +15,9 @@ venv/
 env/
 ENV/
 
-# Streamlit
-.streamlit/
+# Streamlit (ignore secrets, but keep the shared theme config.toml)
+.streamlit/*
+!.streamlit/config.toml
 
 # Local config
 .env
