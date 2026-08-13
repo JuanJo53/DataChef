@@ -20,10 +20,10 @@ ENV/
 
 # Local config
 .env
+prompts/
 
 # Data outputs
-data/processed/
-data/reports/
+data/
 
 # Logs
 *.log
