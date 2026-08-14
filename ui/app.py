@@ -15,6 +15,7 @@ LOGO_PATH = os.path.join(
 from crew.dashboard_agent.dashboard_agent import build_dashboard_spec
 from crew.dashboard_agent.exporters import to_powerbi, to_tableau
 from ui.charts import render_charts
+from ui.ingestion_view import render_ingestion
 
 
 def _to_gold(df: pd.DataFrame) -> pd.DataFrame:
@@ -162,46 +163,64 @@ def _render_upload_stage():
             st.rerun()
 
 
-def _render_diagnose_stage():
-    st.header("Stage 2: Diagnosis report")
-    st.markdown("The ingestion agent scans for quality issues before any actual transformation starts.")
+# def _render_diagnose_stage():
+#     st.header("Stage 2: Diagnosis report")
+#     st.markdown("The ingestion agent scans for quality issues before any actual transformation starts.")
 
+#     if st.session_state["raw_df"] is None:
+#         st.warning("Load a dataset first in the upload stage.")
+#         return
+
+#     issues = _diagnostic_issues()
+#     for issue in issues:
+#         with st.container():
+#             st.markdown(f"### {issue['title']}")
+#             col1, col2 = st.columns([3, 1])
+#             with col1:
+#                 st.write(issue["detail"])
+#             with col2:
+#                 st.badge(issue["severity"], color="orange")
+#                 st.write(f"Affected rows: {issue['count']}")
+
+#             options = [
+#                 "Drop rows",
+#                 "Fill with UNKNOWN",
+#                 "Standardize format",
+#                 "Flag for review",
+#                 "Keep as-is",
+#             ]
+#             selected = st.radio(
+#                 "Recommended action",
+#                 options,
+#                 index=0,
+#                 key=f"action_{issue['id']}",
+#                 horizontal=True,
+#             )
+#             st.session_state["issue_actions"][issue["id"]] = selected
+#             st.markdown("---")
+
+#     if st.button("Accept diagnosis and continue", type="primary"):
+#         st.session_state["stage"] = 2
+#         st.rerun()
+
+def _render_diagnose_stage():
+    st.header("Stage 2: Ingestion & diagnosis")
+    st.markdown(
+        "The ingestion agent profiles the raw data, scores its health, and "
+        "suggests SQL, indexes and quality alerts. Ask it anything below."
+    )
     if st.session_state["raw_df"] is None:
         st.warning("Load a dataset first in the upload stage.")
         return
 
-    issues = _diagnostic_issues()
-    for issue in issues:
-        with st.container():
-            st.markdown(f"### {issue['title']}")
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.write(issue["detail"])
-            with col2:
-                st.badge(issue["severity"], color="orange")
-                st.write(f"Affected rows: {issue['count']}")
+    df = _to_gold(st.session_state["raw_df"])   # _to_gold YA existe en app.py: tipa fechas y números
+    table_name = st.session_state.get("uploaded_file") or "ingested_data"
+    render_ingestion(df, table_name=table_name)
 
-            options = [
-                "Drop rows",
-                "Fill with UNKNOWN",
-                "Standardize format",
-                "Flag for review",
-                "Keep as-is",
-            ]
-            selected = st.radio(
-                "Recommended action",
-                options,
-                index=0,
-                key=f"action_{issue['id']}",
-                horizontal=True,
-            )
-            st.session_state["issue_actions"][issue["id"]] = selected
-            st.markdown("---")
-
+    st.markdown("---")
     if st.button("Accept diagnosis and continue", type="primary"):
         st.session_state["stage"] = 2
         st.rerun()
-
 
 def _render_transform_stage():
     st.header("Stage 3: Transformation and processing")
