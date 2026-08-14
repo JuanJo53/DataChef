@@ -1,5 +1,49 @@
+import os
+import re
+
 import streamlit as st
 import pandas as pd
+
+# Logo DATAChef (imagen que el equipo agrego en ui/img/). Ruta absoluta para
+# que funcione sin importar desde donde se ejecute la app.
+LOGO_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "img",
+    "Gemini_Generated_Image_adhg9madhg9madhg.png",
+)
+
+from crew.dashboard_agent.dashboard_agent import build_dashboard_spec
+from crew.dashboard_agent.exporters import to_powerbi, to_tableau
+from ui.charts import render_charts
+
+
+def _to_gold(df: pd.DataFrame) -> pd.DataFrame:
+    """Prep minima hacia la capa 'gold': tipa fechas y numeros. En el pipeline
+    final esto lo entregaria ya listo el transformation agent (aqui es respaldo).
+
+    - Columnas con 'date' en el nombre -> datetime.
+    - Columnas de texto que en realidad son numeros ('$1,200', '85%') -> numero.
+      Esto evita el caso 'no salen graficos' cuando el CSV trae numeros como texto.
+    """
+    df = df.copy()
+    for col in df.columns:
+        if "date" in col.lower():
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+
+    text_cols = [
+        c for c in df.columns
+        if not pd.api.types.is_numeric_dtype(df[c])
+        and not pd.api.types.is_datetime64_any_dtype(df[c])
+        and not pd.api.types.is_bool_dtype(df[c])
+    ]
+    for col in text_cols:
+        limpio = df[col].astype(str).str.replace(r"[$,%\s]", "", regex=True)
+        convertido = pd.to_numeric(limpio, errors="coerce")
+        # Solo se convierte si la mayoria (>=80%) son numeros de verdad;
+        # asi un 'customer_id' tipo 'C-001' se queda como texto.
+        if convertido.notna().mean() >= 0.8:
+            df[col] = convertido
+    return df
 
 
 def _init_state():
@@ -210,57 +254,81 @@ def clean_orders(df):
 
 def _render_dashboard_stage():
     st.header("Stage 4: Dashboard and insights")
-    st.markdown("The final agent turns the cleaned data into charts and business-facing insights.")
+    st.markdown("The dashboard agent turns the cleaned (gold) data into KPIs, charts and business insights.")
 
     if not st.session_state["dashboard_ready"]:
         st.info("Complete the previous stages to generate the dashboard. The agent is ready once the transformed data is approved.")
         return
 
-    st.subheader("Business request")
+    # 1. Conseguir el DataFrame a analizar.
+    #    Prioridad: la capa gold que dejen los agentes previos ('gold_df');
+    #    si aun no existe, se usa el dataset crudo cargado en el Paso 1.
+    df = st.session_state.get("gold_df")
+    if df is None:
+        df = st.session_state.get("raw_df")
+    if df is None or df.empty:
+        st.warning("No data available. Load a dataset in Stage 1 first.")
+        return
+
+    # 2. Prep ligera hacia gold (tipar fechas). Respaldo por si el
+    #    transformation agent aun no entrega los datos ya tipados.
+    df = _to_gold(df)
+
+    # 3. Contexto de negocio (se conserva la UX del mockup del equipo).
     goal = st.selectbox(
         "What would you like to analyze?",
         [
+            "Overview (auto)",
             "Revenue by region",
             "Order performance by month",
             "Customer retention trend",
-            "Anomaly detection",
         ],
     )
     audience = st.selectbox("Audience", ["Executive team", "Operations team", "Analyst team"])
-    st.write(f"Goal: {goal} | Audience: {audience}")
 
-    st.subheader("KPI summary")
-    metrics = st.columns(4)
-    metrics[0].metric("Total revenue", "$8.4K")
-    metrics[1].metric("Orders", "142")
-    metrics[2].metric("Avg. order", "$59.1")
-    metrics[3].metric("Completion rate", "87%")
-
-    st.subheader("Dashboard preview")
-    chart_data = pd.DataFrame(
-        {
-            "month": ["Jan", "Feb", "Mar", "Apr", "May", "Jun"],
-            "revenue": [3.1, 4.2, 4.8, 5.5, 6.4, 8.4],
-        }
+    # 4. Ejecutar el AGENTE DE DASHBOARDS -> produce el spec declarativo.
+    spec = build_dashboard_spec(df)
+    st.caption(
+        f"Analyzed {spec['meta']['rows']} rows x {spec['meta']['columns']} cols "
+        f"| Goal: {goal} | Audience: {audience}"
     )
-    st.line_chart(chart_data.set_index("month"))
 
-    st.subheader("AI-generated insight")
-    st.info(
-        "Revenue increased steadily over the last six months, with the strongest growth in the North region. "
-        "The data quality issue around missing customer IDs has been resolved, improving downstream reporting reliability."
-    )
+    # 5. Dibujar el dashboard real con la capa de charts (Plotly).
+    render_charts({"spec": spec, "data": df})
+
+    # 6. Exportadores: mismo spec -> Power BI / Tableau (sin reescribir el agente).
+    table = re.sub(r"\W+", "_", str(st.session_state.get("uploaded_file") or "DataChef")).strip("_")
+    with st.expander("📤  Export to Power BI (DAX measures)"):
+        pkg = to_powerbi(spec, table_name=table)
+        st.code("\n".join(pkg["dax_measures"]), language="dax")
+        if pkg["relationships"]:
+            st.caption("Suggested relationships:")
+            for r in pkg["relationships"]:
+                st.markdown(f"- `{r['from']}` → `{r['to']}` ({r['cardinality']}, {r['cross_filter']})")
+        st.caption("Live push hook ready for `powerbi-modeling-mcp`.")
+
+    with st.expander("📤  Export to Tableau"):
+        res = to_tableau(spec)  # sin api_key todavia
+        st.info(f"Status: {res['status']} — {res['reason']}")
+        st.caption("Add a Tableau API key in to_tableau(spec, api_key=...) to connect later.")
 
     st.button("Export report", type="primary")
 
 
 def run_app():
-    st.set_page_config(page_title="DataChef Demo", layout="wide")
+    st.set_page_config(page_title="DataChef", page_icon=LOGO_PATH, layout="wide")
+
+    # Logo de marca: arriba a la izquierda y en el sidebar.
+    st.logo(LOGO_PATH, size="large")
+
     _init_state()
     _render_stage_nav()
 
-    st.title("DataChef")
-    st.caption("Agentic workflow for ingestion, transformation, and dashboarding")
+    # Encabezado: logo grande centrado.
+    _, mid, _ = st.columns([1, 2, 1])
+    with mid:
+        st.image(LOGO_PATH, width="stretch")
+        st.caption("Agentic workflow for ingestion, transformation, and dashboarding")
 
     stage = st.session_state["stage"]
     if stage == 0:
