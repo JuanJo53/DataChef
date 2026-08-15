@@ -1,6 +1,12 @@
 import os
-import re
+import sys
 
+# Asegurar que el directorio raíz del proyecto esté en sys.path
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+import re
 import pandas as pd
 import streamlit as st
 
@@ -163,9 +169,6 @@ def _render_diagnose_stage():
         st.rerun()
 
 
-# =====================================================================
-# STAGE 3: TRANSFORMATION AGENT (CONECTADO Y REAL CON LOCAL SANDBOX)
-# =====================================================================
 def _render_transform_stage():
     st.header("Stage 3: Transformation and processing")
     st.markdown(
@@ -189,14 +192,12 @@ def _render_transform_stage():
             "Executing Pandas code in Local Sandbox (with Self-Healing)..."
         ):
             try:
-                # Ejecución de tu Agente Real
                 df_transformed, generated_code = (
                     execute_transformation_with_sandbox(
                         st.session_state["raw_df"], user_prompt
                     )
                 )
 
-                # Guardar en el estado para que pase a la Gold Layer (Dashboard)
                 st.session_state["gold_df"] = df_transformed
                 st.session_state["generated_code"] = generated_code
                 st.success("✅ Transformation executed successfully!")
@@ -204,7 +205,6 @@ def _render_transform_stage():
             except Exception as e:
                 st.error(f"❌ Transformation failed: {e}")
 
-    # Si ya se ejecutó la transformación, muestra los resultados reales
     if (
         "gold_df" in st.session_state
         and st.session_state["gold_df"] is not None
@@ -247,7 +247,6 @@ def _render_dashboard_stage():
         )
         return
 
-    # Intenta obtener la capa Gold limpia producida por tu agente
     df = st.session_state.get("gold_df")
     if df is None:
         df = st.session_state.get("raw_df")
