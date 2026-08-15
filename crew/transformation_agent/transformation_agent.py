@@ -1,26 +1,27 @@
 import os
 import re
+import sys
+import asyncio
 import pandas as pd
 from dotenv import find_dotenv, load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
+from google import genai
+
+# Fix para conflictos de asyncio/sockets de Google API en Windows
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 # Carga automáticamente el archivo .env buscando desde la raíz del proyecto
 load_dotenv(find_dotenv())
 
 
-def get_llm():
-    """Inicializa el modelo Gemini 1.5 Pro usando la API Key de las variables de entorno."""
+def get_client():
+    """Inicializa el cliente oficial de Google GenAI usando la API Key."""
     api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise ValueError(
             "Falta la variable de entorno GOOGLE_API_KEY. Configúrala en tu archivo .env"
         )
-
-    return ChatGoogleGenerativeAI(
-        model="gemini-1.5-pro",
-        temperature=0.1,  # Temperatura baja para garantizar código de Python sintácticamente correcto
-        google_api_key=api_key,
-    )
+    return genai.Client(api_key=api_key)
 
 
 def clean_code_block(text: str) -> str:
@@ -32,7 +33,7 @@ def clean_code_block(text: str) -> str:
 
 
 def generate_transformation_code(
-    columns_info: str, user_prompt: str, llm
+    columns_info: str, user_prompt: str, client
 ) -> str:
     """Solicita al LLM la generación del script de Pandas."""
     system_prompt = f"""
@@ -51,12 +52,15 @@ def generate_transformation_code(
     4. NO agregues explicaciones, comentarios de texto ni introducción. Solo el código Python.
     """
 
-    response = llm.invoke(system_prompt)
-    return clean_code_block(response.content)
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=system_prompt,
+    )
+    return clean_code_block(response.text)
 
 
 def fix_failing_code(
-    failing_code: str, error_msg: str, columns_info: str, llm
+    failing_code: str, error_msg: str, columns_info: str, client
 ) -> str:
     """Auto-corrige el código de Python que falló en la ejecución (Self-Healing)."""
     fix_prompt = f"""
@@ -74,8 +78,11 @@ def fix_failing_code(
     Por favor, analiza el error, corrígelo y devuelve ÚNICAMENTE el código corregido dentro de un bloque ```python ... ```.
     """
 
-    response = llm.invoke(fix_prompt)
-    return clean_code_block(response.content)
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=fix_prompt,
+    )
+    return clean_code_block(response.text)
 
 
 def execute_transformation_with_sandbox(
@@ -85,7 +92,7 @@ def execute_transformation_with_sandbox(
     Función principal expuesta para el equipo (Streamlit/Backend).
     Ejecuta el código generado en un Local Sandbox y aplica Self-Healing si falla.
     """
-    llm = get_llm()
+    client = get_client()
 
     # Trabajar con una copia para evitar modificar el dataframe original si falla
     df_working = df_original.copy()
@@ -93,7 +100,7 @@ def execute_transformation_with_sandbox(
 
     print("🤖 Generando script de transformación...")
     current_code = generate_transformation_code(
-        columns_info, user_prompt, llm
+        columns_info, user_prompt, client
     )
 
     # Bucle del Local Sandbox con auto-corrección
@@ -122,7 +129,7 @@ def execute_transformation_with_sandbox(
             if attempt < max_retries:
                 print("🔄 Aplicando Self-Healing para reparar el código...")
                 current_code = fix_failing_code(
-                    current_code, error_message, columns_info, llm
+                    current_code, error_message, columns_info, client
                 )
 
     raise RuntimeError(
@@ -153,12 +160,11 @@ def run_pipeline(input_csv_path: str, output_csv_path: str):
     # 2. Aplicar Transformaciones Registradas
 """
 
-    # Indentar correctamente cada línea del script para que encaje dentro de la función run_pipeline
     indented_lines = []
     for line in code_script.split("\n"):
-        if line.strip():  # Si la línea tiene contenido
+        if line.strip():
             indented_lines.append("    " + line)
-        else:  # Si es una línea en blanco
+        else:
             indented_lines.append("")
 
     indented_code = "\n".join(indented_lines)
@@ -171,7 +177,6 @@ def run_pipeline(input_csv_path: str, output_csv_path: str):
     return df
 
 if __name__ == "__main__":
-    # Cambia los nombres de los archivos según tu necesidad
     run_pipeline("nuevos_datos_crudos.csv", "datos_limpios_resultado.csv")
 """
 
