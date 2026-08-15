@@ -1,12 +1,16 @@
 import os
 import re
 import pandas as pd
+from dotenv import find_dotenv, load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
+
+# Carga automáticamente el archivo .env buscando desde la raíz del proyecto
+load_dotenv(find_dotenv())
 
 
 def get_llm():
     """Inicializa el modelo Gemini 1.5 Pro usando la API Key de las variables de entorno."""
-    api_key = os.getenv("GOOGLE_API_KEY")
+    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise ValueError(
             "Falta la variable de entorno GOOGLE_API_KEY. Configúrala en tu archivo .env"
@@ -95,7 +99,9 @@ def execute_transformation_with_sandbox(
     # Bucle del Local Sandbox con auto-corrección
     for attempt in range(1, max_retries + 1):
         try:
-            print(f"⚙️ [Intento {attempt}/{max_retries}] Ejecutando en Local Sandbox...")
+            print(
+                f"⚙️ [Intento {attempt}/{max_retries}] Ejecutando en Local Sandbox..."
+            )
 
             # Creación del entorno aislado (Scope)
             sandbox_scope = {"pd": pd, "df": df_working}
