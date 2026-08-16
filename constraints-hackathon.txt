@@ -1,0 +1,13 @@
+# Exact direct-dependency versions proven on Windows with Python 3.13.14.
+# This is intentionally not a full freeze of transitive packages.
+streamlit==1.61.1
+plotly==6.9.0
+pandas==3.0.5
+pyspark==4.2.0
+pydantic==2.11.10
+crewai==1.15.16
+google-genai==2.8.0
+langchain-google-genai==4.3.4
+python-dotenv==1.2.2
+pyarrow==24.0.0
+pytest==9.1.1
