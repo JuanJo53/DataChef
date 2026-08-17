@@ -8,7 +8,12 @@ import streamlit as st
 
 from datachef.contracts import DownstreamUse, UserIntent
 from ui import state as ui_state
-from ui.screens import build_transformation_requests, render_findings, render_result
+from ui.screens import (
+    build_transformation_requests,
+    render_diagnosis,
+    render_findings,
+    render_result,
+)
 
 
 def _column_names(session: Any) -> list[str]:
@@ -32,14 +37,19 @@ def _render_suggested_questions(session: Any) -> list[str]:
 
 
 def render(controller: Any, state: Any) -> None:
-    st.header("2 · Describe what you need")
+    st.header("2 · Objective")
     session = controller.session
     if session.source is None or session.display_diagnostic_report is None:
-        st.info("Upload and diagnose a dataset first.")
+        st.info("Upload a dataset and run the diagnosis first.")
         return
+
+    # The diagnosis is produced on the previous stage but the controller lands
+    # the user here, so this is where that evidence has to be readable.
+    render_diagnosis(session)
 
     columns = _column_names(session)
 
+    st.markdown("### What you need from this table")
     goal = st.text_area(
         "What should this table be good for?",
         key=ui_state.GOAL_WIDGET,
@@ -61,23 +71,21 @@ def render(controller: Any, state: Any) -> None:
         step=1.0,
         key=ui_state.ROW_LOSS_WIDGET,
     )
-    key_columns = st.multiselect(
-        "Key columns",
-        columns,
-        key=ui_state.KEY_COLUMNS_WIDGET,
-    )
     required_columns = st.multiselect(
         "Columns that must survive",
         columns,
         key=ui_state.REQUIRED_COLUMNS_WIDGET,
+        help="DataChef refuses any plan that would drop one of these columns.",
     )
-    authored = st.text_area(
-        "Your analytical questions (one per line)",
-        key=ui_state.QUESTIONS_WIDGET,
-        height=80,
+    key_columns = st.multiselect(
+        "Which column tells you two rows are the same record?",
+        columns,
+        key=ui_state.KEY_COLUMNS_WIDGET,
+        help=(
+            "If two rows share this value, DataChef treats them as duplicates — "
+            "for example order_id or email. Leave empty if you're not sure."
+        ),
     )
-    selected_question_ids = _render_suggested_questions(session)
-
     st.markdown("### Typed transformation requests")
     st.caption(
         "This offline slice executes numeric casts and key deduplication. The "
@@ -94,10 +102,24 @@ def render(controller: Any, state: Any) -> None:
         key=ui_state.DEDUP_REQUEST_WIDGET,
     )
 
+    # Questions drive the dashboard, not the cleaning plan, so they sit below
+    # every cleaning field in their own section.
+    st.markdown("### Business questions for the dashboard")
+    st.caption(
+        "Optional. These shape the dashboard you get at the end — they do not "
+        "change how your data is cleaned."
+    )
+    authored = st.text_area(
+        "Your analytical questions (one per line)",
+        key=ui_state.QUESTIONS_WIDGET,
+        height=80,
+    )
+    selected_question_ids = _render_suggested_questions(session)
+
     render_findings(session.findings)
 
     if st.button(
-        "Submit intent",
+        "Save objective and build a plan",
         key=ui_state.SUBMIT_INTENT_WIDGET,
         type="primary",
     ):

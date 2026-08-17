@@ -58,7 +58,7 @@ def _render_report(report: Any) -> None:
 
 
 def render(controller: Any, state: Any) -> None:
-    st.header("5 · Quality assurance")
+    st.header("5 · Quality")
     session = controller.session
     runtime = session.workflow_runtime
     if runtime is None:

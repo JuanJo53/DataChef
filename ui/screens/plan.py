@@ -22,10 +22,13 @@ def _render_operations(plan: Any) -> None:
         return
     for index, operation in enumerate(plan.operations, start=1):
         columns = ", ".join(operation.target_columns) or "—"
-        with st.expander(
-            f"{index}. {operation.operation_type.value} — {columns} "
-            f"(risk {operation.risk.value})"
-        ):
+        # Risk is read straight off the plan operation and shown as text, never
+        # as colour alone and never inside a collapsed label the reader can miss.
+        st.markdown(
+            f"{index}. **{operation.operation_type.value}** on {columns} — "
+            f"risk **{operation.risk.value}**"
+        )
+        with st.expander(f"Operation {index} detail"):
             st.markdown(f"**Why:** {operation.rationale}")
             st.markdown(f"**Expected effect:** {operation.expected_effect}")
             st.caption(f"Operation `{operation.operation_id}`")
@@ -103,7 +106,7 @@ def _render_revise_form(controller: Any, state: Any, session: Any) -> None:
     columns = [column.name for column in session.source.identity.column_schema]
     cast_default, dedup_default = _current_request_columns(session)
 
-    with st.expander("Revise your intent and plan again", expanded=True):
+    with st.expander("Revise your objective and plan again", expanded=True):
         st.caption(
             "Revising keeps the uploaded dataset and its diagnosis. It clears the "
             "prepared plan and the recorded command history for this dataset."
@@ -135,7 +138,7 @@ def _render_revise_form(controller: Any, state: Any, session: Any) -> None:
             key=ui_state.REVISE_DEDUP_REQUEST_WIDGET,
         )
         if not st.button(
-            "Revise intent",
+            "Revise objective",
             key=ui_state.REVISE_SUBMIT_WIDGET,
             type="primary",
         ):
@@ -179,7 +182,7 @@ def _render_reviews(state_evidence: Any) -> None:
 
 
 def render(controller: Any, state: Any) -> None:
-    st.header("3 · Review the deterministic plan")
+    st.header("3 · Plan")
     session = controller.session
     if session.intent is None:
         st.info("Describe what you need before a plan can be prepared.")

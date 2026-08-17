@@ -222,6 +222,20 @@ def _legacy_issue_to_contract(issue: dict[str, object]) -> DiagnosticIssue:
     )
 
 
+def _can_identify_a_row(dataframe: pd.DataFrame, column: str) -> bool:
+    """Reject a key candidate that cannot distinguish one row from another.
+
+    A column holding a single distinct non-null value identifies every row
+    equally, so deduplicating on it would collapse the table. Fails closed: an
+    unmeasurable column is not nominated.
+    """
+
+    try:
+        return int(dataframe[column].nunique(dropna=True)) >= 2
+    except (TypeError, ValueError, KeyError):
+        return False
+
+
 def _candidate_key_sets(
     dataframe: pd.DataFrame,
     selected_key_columns: tuple[str, ...],
@@ -235,8 +249,13 @@ def _candidate_key_sets(
         normalized = str(column).lower()
         if normalized == "id" or normalized.endswith("_id"):
             candidate = (str(column),)
-            if candidate not in candidates:
-                candidates.append(candidate)
+            if candidate in candidates:
+                continue
+            # Narrowing only: an explicitly selected key is still honoured above,
+            # but the name heuristic no longer nominates a constant column.
+            if not _can_identify_a_row(dataframe, str(column)):
+                continue
+            candidates.append(candidate)
     return tuple(candidates)
 
 

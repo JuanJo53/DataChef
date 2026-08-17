@@ -1039,6 +1039,21 @@ class DataChefController:
             selected_questions=self._selected_questions(),
         )
 
+    def navigate(self, screen: ScreenId) -> TransitionResult:
+        """Move presentation to another screen without touching workflow state.
+
+        Navigation authorizes nothing: it does not clear command history, the
+        pending approval, findings, or any workflow evidence. Every gate keys off
+        workflow stage and evidence, never off the screen.
+        """
+
+        previous = self._session
+        self._session = navigate(self._session, screen)
+        return self._transition(
+            changed=self._session is not previous,
+            code="SCREEN_CHANGED" if self._session is not previous else "SCREEN_UNCHANGED",
+        )
+
     def set_preview_enabled(self, enabled: bool) -> TransitionResult:
         previous = self._session
         self._session = set_preview(self._session, enabled)

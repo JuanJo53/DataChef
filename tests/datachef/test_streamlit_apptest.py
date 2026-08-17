@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from datachef.application import DataChefController
+from datachef.application import DataChefController, ScreenId
 from datachef.contracts import QAStatus, WorkflowStage
 from datachef.workflow import WorkflowRuntime, execute_workflow
 from ui import state as ui_state
@@ -408,11 +408,15 @@ def test_refusal_routes_never_surface_a_traceback(drive) -> None:
 
 
 def _refused_plan(cast_columns: list[str] | None = None) -> AppTest:
-    """Drive the constant-key dataset to a validation-refused plan."""
+    """Drive a genuine row-loss refusal: a real duplicate key over the threshold.
+
+    `order_id` has one duplicate in twelve rows (8.33%), so an acceptable row
+    loss of 5% is refused by validation.
+    """
 
     at = _app()
-    _upload_and_diagnose(at, CONSTANT_KEY_CSV, "catalogue.csv")
-    _submit_intent(at, cast_columns=cast_columns, row_loss=0.0)
+    _upload_and_diagnose(at, DEMO_CSV, "orders.csv")
+    _submit_intent(at, cast_columns=cast_columns, row_loss=5.0)
     _prepare(at)
     runtime = _controller(at).session.workflow_runtime
     assert runtime is not None
@@ -443,6 +447,8 @@ def _all_text(at: AppTest) -> str:
     return " ".join(
         [item.value for item in at.error]
         + [item.value for item in at.warning]
+        + [item.value for item in at.info]
+        + [item.value for item in at.success]
         + [item.value for item in at.markdown]
         + [item.value for item in at.caption]
         + [f"{item.label} {item.value}" for item in at.metric]
@@ -450,18 +456,18 @@ def _all_text(at: AppTest) -> str:
 
 
 def test_row_loss_refusal_shows_the_finding_operation_and_both_thresholds() -> None:
-    at = _refused_plan(cast_columns=["price"])
+    at = _refused_plan(cast_columns=["region"])
 
     text = _all_text(at)
     assert "ROW_LOSS_THRESHOLD" in text
     assert "CUMULATIVE_ROW_LOSS_THRESHOLD" in text
     assert "Estimated row loss exceeds the user's approved threshold." in text
-    assert "op-deduplicate-keys-category_id" in text
-    assert "88.89%" in text
-    assert "8 row(s)" in text
+    assert "op-deduplicate-keys-order_id" in text
+    assert "8.33%" in text
+    assert "1 row(s)" in text
     labels = {item.label: item.value for item in at.metric}
-    assert labels["Estimated cumulative row loss"] == "88.89%"
-    assert labels["Your acceptable row loss"] == "0.00%"
+    assert labels["Estimated cumulative row loss"] == "8.33%"
+    assert labels["Your acceptable row loss"] == "5.00%"
     _assert_locked_down(at)
 
 
@@ -477,7 +483,7 @@ def test_refusal_message_names_the_code_and_never_blames_a_reviewer() -> None:
 
 
 def test_revise_recovers_from_a_refusal_without_reset_or_reupload() -> None:
-    at = _refused_plan(cast_columns=["price"])
+    at = _refused_plan(cast_columns=["region"])
     session = _controller(at).session
     fingerprint = session.source.identity.fingerprint
     generation = session.uploader_generation
@@ -573,10 +579,308 @@ def test_reset_clears_the_revise_form_widget_state() -> None:
 
 
 def test_validation_refusal_route_exposes_no_downloads_or_dashboard() -> None:
-    at = _refused_plan(cast_columns=["price"])
+    at = _refused_plan(cast_columns=["region"])
 
     _assert_locked_down(at)
     assert _controller(at).session.workflow_runtime.gold_dataframe is None
+
+
+DEMO_CSV = (
+    b"order_id,region,product,unit_price,quantity\n"
+    b"1001,North,Laptop Stand,45.50,2\n"
+    b"1002,South,USB-C Hub,29.99,5\n"
+    b"1003,North,Monitor Arm,89.00,1\n"
+    b"1004,West,Keyboard,72.25,3\n"
+    b"1005,South,Mouse Pad,12.00,10\n"
+    b"1006,East,Webcam,64.99,2\n"
+    b"1007,North,Desk Lamp,38.40,4\n"
+    b"1008,West,Cable Kit,19.95,6\n"
+    b"1009,East,Laptop Sleeve,27.30,3\n"
+    b"1010,South,Docking Station,149.00,1\n"
+    b"1011,North,Headset,88.75,2\n"
+    b"1011,North,Headset,88.75,2\n"
+)
+
+
+def test_refused_plan_screen_shows_each_operation_risk_as_text() -> None:
+    at = _refused_plan()
+
+    text = _all_text(at)
+    runtime = _controller(at).session.workflow_runtime
+    operations = runtime.state.transformation_plan.operations
+    assert operations
+    for operation in operations:
+        assert operation.operation_type.value in text
+        assert f"risk **{operation.risk.value}**" in text
+    assert "risk **HIGH**" in text
+
+
+def test_plan_operation_risk_is_not_hidden_inside_a_collapsed_label() -> None:
+    at = _refused_plan()
+
+    visible = " ".join(item.value for item in at.markdown)
+    assert "risk **HIGH**" in visible
+    labels = " ".join(str(getattr(item, "label", "")) for item in at.expander)
+    assert "risk" not in labels
+
+
+def test_upload_screen_states_only_the_disk_claim_datachef_controls() -> None:
+    at = _app()
+    at.run()
+    at.file_uploader[0].set_value(("orders.csv", DEMO_CSV, "text/csv"))
+    at.run()
+
+    captions = " ".join(item.value for item in at.caption)
+    assert "DataChef never writes your file to disk" in captions
+    assert "reads only its extension to pick a parser" in captions
+    assert "contacts no provider" in captions
+    assert "Nothing is written to disk" not in captions
+
+
+def test_diagnosis_renders_on_the_screen_the_user_lands_on_after_diagnosing() -> None:
+    at = _app()
+    _upload_and_diagnose(at, DEMO_CSV, "orders.csv")
+
+    session = _controller(at).session
+    assert session.screen.value == "INTENT"
+    labels = {item.label: item.value for item in at.metric}
+    assert labels["Health score"] == "97"
+    assert labels["Grade"] == "A"
+    assert labels["Duplicate rows"] == "1"
+    text = _all_text(at)
+    assert "Deterministic diagnosis" in text
+    assert "Duplicate rows detected" in text
+    assert "Duplicate values detected for key columns: order_id" in text
+    assert "columns: order_id" in text
+    assert "`HIGH`" in text
+    _assert_no_traceback(at)
+
+
+def test_operation_risk_renders_as_text_on_the_approval_screen() -> None:
+    at = _app()
+    _upload_and_diagnose(at, DEMO_CSV, "orders.csv")
+    _submit_intent(at, key_columns=["order_id"], row_loss=10.0)
+    _prepare(at)
+
+    session = _controller(at).session
+    assert session.screen.value == "APPROVAL"
+    operations = session.workflow_runtime.state.transformation_plan.operations
+    assert operations
+    text = _all_text(at)
+    for operation in operations:
+        assert f"risk **{operation.risk.value}**" in text
+    assert "risk **HIGH**" in text
+    _assert_no_traceback(at)
+
+
+def test_stage_indicator_renders_all_six_stages_and_marks_the_current_one() -> None:
+    at = _app()
+    at.run()
+
+    sidebar_text = " ".join(item.value for item in at.sidebar.markdown)
+    for label in ("1 · Upload", "2 · Objective", "3 · Plan", "4 · Approve",
+                  "5 · Quality", "6 · Results"):
+        assert label in sidebar_text
+    assert "**➡️ 1 · Upload**" in sidebar_text
+    assert "◻️ 6 · Results" in sidebar_text
+    _assert_no_traceback(at)
+
+
+def test_no_rendered_text_says_intent() -> None:
+    at = _pass_run()
+
+    for probe in (at, _refused_plan()):
+        rendered = " ".join(
+            [item.value for item in probe.markdown]
+            + [item.value for item in probe.caption]
+            + [item.value for item in probe.header]
+            + [item.value for item in probe.title]
+            + [item.value for item in probe.info]
+            + [item.value for item in probe.success]
+            + [item.value for item in probe.warning]
+            + [item.value for item in probe.error]
+            + [str(item.label) for item in probe.button]
+            + [str(item.label) for item in probe.expander]
+        )
+        assert "Intent" not in rendered
+        assert "intent" not in rendered
+
+
+def test_upload_preview_is_opt_in_capped_and_evidence_free() -> None:
+    at = _app()
+    at.run()
+    at.file_uploader[0].set_value(("orders.csv", DEMO_CSV, "text/csv"))
+    at.run()
+
+    before = _controller(at).session
+    assert before.preview_enabled is False
+    assert len(at.dataframe) == 0
+    toggle = _widget(at, "button", ui_state.UPLOAD_PREVIEW_WIDGET)
+    assert "10-row preview" in toggle.label
+
+    toggle.click()
+    at.run()
+
+    after = _controller(at).session
+    assert after.preview_enabled is True
+    assert after.command_history == before.command_history
+    assert after.workflow_runtime is before.workflow_runtime is None
+    assert after.source.identity == before.source.identity
+    assert len(at.dataframe) == 1
+    assert at.dataframe[0].value.shape[0] <= 10
+    _assert_no_traceback(at)
+
+
+def test_key_question_is_plain_language_and_follows_required_columns() -> None:
+    at = _app()
+    _upload_and_diagnose(at, DEMO_CSV, "orders.csv")
+
+    labels = [str(item.label) for item in at.multiselect]
+    required_label = "Columns that must survive"
+    key_label = "Which column tells you two rows are the same record?"
+    assert required_label in labels
+    assert key_label in labels
+    assert labels.index(required_label) < labels.index(key_label)
+    assert "Key columns" not in labels
+    _assert_no_traceback(at)
+
+
+def test_dashboard_questions_sit_in_their_own_section_below_the_cleaning_fields() -> None:
+    at = _app()
+    _upload_and_diagnose(at, DEMO_CSV, "orders.csv")
+
+    text = _all_text(at)
+    assert "Business questions for the dashboard" in text
+    assert (
+        "Optional. These shape the dashboard you get at the end — they do not "
+        "change how your data is cleaned."
+    ) in text
+
+    headings = [item.value for item in at.markdown]
+    questions_heading = headings.index("### Business questions for the dashboard")
+    requests_heading = headings.index("### Typed transformation requests")
+    assert requests_heading < questions_heading
+
+    multiselects = [str(item.label) for item in at.multiselect]
+    required_at = multiselects.index("Columns that must survive")
+    key_at = multiselects.index("Which column tells you two rows are the same record?")
+    cast_at = multiselects.index("Cast these columns to numeric")
+    dedup_at = multiselects.index("Deduplicate rows by these keys")
+    suggested_at = multiselects.index(
+        "Deterministic suggested questions to carry into the dashboard"
+    )
+    # Cleaning fields keep their order; both question inputs come last.
+    assert required_at < key_at < cast_at < dedup_at < suggested_at
+    text_areas = [str(item.label) for item in at.text_area]
+    assert text_areas[-1] == "Your analytical questions (one per line)"
+    _assert_no_traceback(at)
+
+
+def test_reset_clears_the_dashboard_question_widgets() -> None:
+    at = _app()
+    _upload_and_diagnose(at, DEMO_CSV, "orders.csv")
+    _widget(at, "text_area", ui_state.QUESTIONS_WIDGET).set_value("Which region wins?")
+    at.run()
+    assert at.session_state[ui_state.QUESTIONS_WIDGET] == "Which region wins?"
+
+    _widget(at, "button", ui_state.RESET_WIDGET).click()
+    at.run()
+
+    assert ui_state.QUESTIONS_WIDGET not in at.session_state
+    assert ui_state.SUGGESTED_QUESTIONS_WIDGET not in at.session_state
+    assert _controller(at).session.source is None
+    _assert_locked_down(at)
+
+
+def test_empty_plan_names_the_findings_it_cannot_act_on_and_still_passes() -> None:
+    at = _app()
+    _upload_and_diagnose(at, CONSTANT_KEY_CSV, "catalogue.csv")
+    _submit_intent(at, row_loss=0.0)
+    _prepare(at)
+
+    session = _controller(at).session
+    assert session.screen.value == "APPROVAL"
+    plan = session.workflow_runtime.state.transformation_plan
+    assert plan.operations == ()
+    kinds = {issue.kind.value for issue in session.display_diagnostic_report.issues}
+    assert "DUPLICATE_ROWS" in kinds and "NULL_VALUES" in kinds
+
+    text = _all_text(at)
+    assert "The reviewed plan is empty" in text
+    assert "The diagnosis reported" in text
+    assert "DUPLICATE_ROWS" in text
+    assert "NULL_VALUES" in text
+    assert "no executable operation for those" in text
+
+    _approve_and_execute(at)
+
+    final = _controller(at).session
+    assert final.workflow_runtime.state.stage is WorkflowStage.QA_PASSED
+    assert final.workflow_runtime.state.qa_report.status is QAStatus.PASS
+    assert len(at.download_button) == 6
+    _assert_no_traceback(at)
+
+
+def test_a_non_empty_plan_does_not_show_the_empty_plan_explanation() -> None:
+    at = _app()
+    _upload_and_diagnose(at, DEMO_CSV, "orders.csv")
+    _submit_intent(at, key_columns=["order_id"], row_loss=10.0)
+    _prepare(at)
+
+    session = _controller(at).session
+    assert session.workflow_runtime.state.transformation_plan.operations
+    text = _all_text(at)
+    assert "The reviewed plan is empty" not in text
+    assert "The diagnosis reported" not in text
+    assert "no executable operation for those" not in text
+    _assert_no_traceback(at)
+
+
+def test_stage_indicator_navigates_back_without_losing_workflow_state() -> None:
+    at = _pass_run()
+    before = _controller(at).session
+    assert before.screen.value == "RESULTS"
+
+    _widget(at, "button", f"{ui_state.STAGE_NAV_WIDGET}_PLAN").click()
+    at.run()
+
+    after = _controller(at).session
+    assert after.screen.value == "PLAN"
+    assert after.command_history == before.command_history
+    assert after.pending_approval == before.pending_approval
+    assert after.workflow_runtime.state == before.workflow_runtime.state
+    assert after.source.identity == before.source.identity
+    assert len(at.download_button) == 0
+    _assert_no_traceback(at)
+
+    _widget(at, "button", f"{ui_state.STAGE_NAV_WIDGET}_RESULTS").click()
+    at.run()
+    returned = _controller(at).session
+    assert returned.screen.value == "RESULTS"
+    assert returned.command_history == before.command_history
+    assert len(at.download_button) == 6
+
+
+def test_navigating_forward_cannot_skip_approval_or_execution() -> None:
+    at = _app()
+    _upload_and_diagnose(at, DEMO_CSV, "orders.csv")
+    _submit_intent(at, key_columns=["order_id"], row_loss=10.0)
+    _prepare(at)
+    controller = _controller(at)
+    assert controller.session.workflow_runtime.state.stage is WorkflowStage.AWAITING_APPROVAL
+    assert controller.session.pending_approval is None
+
+    controller.navigate(ScreenId.RESULTS)
+    at.run()
+
+    session = _controller(at).session
+    assert session.screen.value == "RESULTS"
+    assert session.pending_approval is None
+    assert session.workflow_runtime.state.stage is WorkflowStage.AWAITING_APPROVAL
+    assert session.workflow_runtime.gold_dataframe is None
+    assert len(at.download_button) == 0
+    assert "DataChef Dashboard" not in [header.value for header in at.header]
+    _assert_no_traceback(at)
 
 
 def test_ui_never_imports_a_provider_or_the_transformation_agent() -> None:

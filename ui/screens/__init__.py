@@ -50,6 +50,34 @@ def build_transformation_requests(
     return tuple(built)
 
 
+def render_diagnosis(session: Any) -> None:
+    """Render the deterministic diagnosis the controller already produced.
+
+    Shared so the screen the user actually lands on after diagnosing shows this
+    evidence. Values are read off session evidence; nothing is derived here.
+    """
+
+    report = session.display_diagnostic_report
+    if report is None:
+        return
+    st.markdown("### Deterministic diagnosis")
+    evidence = report.legacy_evidence
+    left, middle, right = st.columns(3)
+    left.metric("Health score", evidence.health_score)
+    middle.metric("Grade", evidence.health_grade)
+    right.metric("Duplicate rows", report.duplicate_row_count)
+    if not report.issues:
+        st.success("No diagnostic issues were detected.")
+        return
+    st.markdown("#### Issues")
+    for issue in report.issues:
+        columns = ", ".join(issue.affected_columns) or "—"
+        st.markdown(
+            f"- `{issue.severity.value}` **{issue.title}** "
+            f"({issue.kind.value}) — columns: {columns}"
+        )
+
+
 def render_findings(findings: Any) -> None:
     """Render sanitized application findings only; never exception text."""
 
@@ -104,6 +132,7 @@ def render_screen(screen: ScreenId, controller: Any, state: Any) -> None:
 __all__ = [
     "build_transformation_requests",
     "has_blocking",
+    "render_diagnosis",
     "render_failure",
     "render_findings",
     "render_result",

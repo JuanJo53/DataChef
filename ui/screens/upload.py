@@ -15,7 +15,7 @@ from datachef.application import (
     UploadRequest,
 )
 from ui import state as ui_state
-from ui.screens import render_findings, render_result
+from ui.screens import render_diagnosis, render_findings, render_result
 
 _ACCEPTED_SUFFIXES = ("csv", "json", "jsonl", "ndjson", "parquet")
 _JSON_MODES = ("JSON records (a list of objects)", "JSON Lines (one object per line)")
@@ -68,49 +68,38 @@ def _request_for(upload: Any, json_mode: str) -> UploadRequest | None:
     return None
 
 
-def _render_source_summary(session: Any) -> None:
+def _render_source_summary(controller: Any, session: Any) -> None:
     identity = session.source.identity
     left, middle, right = st.columns(3)
     left.metric("Rows", identity.row_count)
     middle.metric("Columns", identity.column_count)
     right.metric("Dataset", identity.dataset_id)
     st.caption(f"Source fingerprint `{identity.fingerprint}`")
+
+    # Opt-in and off by default. A button rather than a second toggle so this
+    # never fights the sidebar control for ownership of the same session flag.
+    label = (
+        "Hide the data preview"
+        if session.preview_enabled
+        else "Show a 10-row preview of my data"
+    )
+    if st.button(label, key=ui_state.UPLOAD_PREVIEW_WIDGET):
+        controller.set_preview_enabled(not session.preview_enabled)
+        st.rerun()
     if session.preview_enabled:
-        st.markdown("#### Local preview")
+        st.markdown("#### Local preview — first 10 rows")
         st.caption(
             "Preview rows are presentation only. They never enter evidence, "
-            "artifacts, or the manifest."
+            "artifacts, the manifest, or any provider context."
         )
         st.dataframe(session.source.raw_copy().head(10), use_container_width=True)
 
 
-def _render_diagnosis(session: Any) -> None:
-    report = session.display_diagnostic_report
-    if report is None:
-        return
-    st.markdown("### Deterministic diagnosis")
-    evidence = report.legacy_evidence
-    left, middle, right = st.columns(3)
-    left.metric("Health score", evidence.health_score)
-    middle.metric("Grade", evidence.health_grade)
-    right.metric("Duplicate rows", report.duplicate_row_count)
-    if not report.issues:
-        st.success("No diagnostic issues were detected.")
-        return
-    st.markdown("#### Issues")
-    for issue in report.issues:
-        columns = ", ".join(issue.affected_columns) or "—"
-        st.markdown(
-            f"- `{issue.severity.value}` **{issue.title}** "
-            f"({issue.kind.value}) — columns: {columns}"
-        )
-
-
 def render(controller: Any, state: Any) -> None:
-    st.header("1 · Upload and diagnose")
+    st.header("1 · Upload")
     st.caption(
-        "The file is parsed in memory. Nothing is written to disk and no "
-        "provider is contacted."
+        "The file is parsed in memory. DataChef never writes your file to disk, "
+        "reads only its extension to pick a parser, and contacts no provider."
     )
     session = controller.session
 
@@ -145,7 +134,7 @@ def render(controller: Any, state: Any) -> None:
         st.info("Upload a dataset to begin.")
         return
 
-    _render_source_summary(session)
+    _render_source_summary(controller, session)
 
     if session.display_diagnostic_report is None:
         if st.button(
@@ -156,5 +145,5 @@ def render(controller: Any, state: Any) -> None:
             result = ui_state.remember_result(state, controller.diagnose())
             render_findings(result.findings)
             st.rerun()
-    _render_diagnosis(controller.session)
+    render_diagnosis(controller.session)
     render_result(ui_state.last_result(state))

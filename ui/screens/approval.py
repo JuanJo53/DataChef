@@ -6,12 +6,38 @@ from typing import Any
 
 import streamlit as st
 
-from datachef.contracts import HumanDecision
+from datachef.contracts import DiagnosticIssueKind, HumanDecision
 from ui import state as ui_state
 from ui.screens import has_blocking, render_findings, render_result
 
 
-def _render_plan_summary(evidence: Any) -> None:
+# The offline slice executes exactly these two operation families, so any other
+# diagnostic finding has no executable operation behind it.
+_EXECUTABLE_ISSUE_KINDS = frozenset(
+    {
+        DiagnosticIssueKind.CANDIDATE_TYPE_CONVERSION,
+        DiagnosticIssueKind.DUPLICATE_KEYS,
+    }
+)
+
+
+def _unaddressable_kinds(report: Any) -> tuple[str, ...]:
+    """Name the reported finding kinds this offline slice cannot act on."""
+
+    if report is None:
+        return ()
+    return tuple(
+        sorted(
+            {
+                issue.kind.value
+                for issue in report.issues
+                if issue.kind not in _EXECUTABLE_ISSUE_KINDS
+            }
+        )
+    )
+
+
+def _render_plan_summary(evidence: Any, report: Any) -> None:
     plan = evidence.transformation_plan
     if plan is None:
         return
@@ -19,11 +45,20 @@ def _render_plan_summary(evidence: Any) -> None:
     st.caption(f"`{plan.plan_id}` · version {plan.version} — {plan.summary}")
     if not plan.operations:
         st.info("The reviewed plan is empty; execution will copy the table unchanged.")
+        unaddressable = _unaddressable_kinds(report)
+        if unaddressable:
+            st.caption(
+                "The diagnosis reported "
+                + ", ".join(unaddressable)
+                + ". This offline slice has no executable operation for those, so "
+                "the plan leaves them as they are."
+            )
     for index, operation in enumerate(plan.operations, start=1):
         columns = ", ".join(operation.target_columns) or "—"
+        # Risk is read straight off the plan operation and shown as text.
         st.markdown(
-            f"{index}. **{operation.operation_type.value}** on {columns} "
-            f"— {operation.expected_effect}"
+            f"{index}. **{operation.operation_type.value}** on {columns} — "
+            f"risk **{operation.risk.value}** — {operation.expected_effect}"
         )
     accepted = evidence.accepted_review
     if accepted is not None:
@@ -42,21 +77,21 @@ def _render_approval_record(approval: Any) -> None:
 
 
 def render(controller: Any, state: Any) -> None:
-    st.header("4 · Approve and run")
+    st.header("4 · Approve")
     session = controller.session
     runtime = session.workflow_runtime
     if runtime is None:
         st.info("Prepare a plan first.")
         return
 
-    _render_plan_summary(runtime.state)
+    _render_plan_summary(runtime.state, session.display_diagnostic_report)
     render_findings(session.findings)
 
     blocking = has_blocking(session.findings)
     if blocking:
         st.error(
             "Approval is disabled while a blocking finding is open. Revise your "
-            "intent or requests to clear it."
+            "objective or requests to clear it."
         )
 
     if session.pending_approval is None:

@@ -75,7 +75,7 @@ def _render_dashboard(handoff: DashboardHandoff, preview_enabled: bool) -> None:
 
 
 def render(controller: Any, state: Any) -> None:
-    st.header("6 · Verified results")
+    st.header("6 · Results")
     session = controller.session
 
     bundle = controller.build_artifacts()

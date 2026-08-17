@@ -52,6 +52,9 @@ REVISE_CAST_REQUEST_WIDGET = "datachef_w_revise_cast_requests"
 REVISE_DEDUP_REQUEST_WIDGET = "datachef_w_revise_dedup_requests"
 REVISE_SUBMIT_WIDGET = "datachef_w_revise_submit"
 PREVIEW_WIDGET = "datachef_w_preview"
+PREVIEW_SYNC = "datachef_preview_sync"
+UPLOAD_PREVIEW_WIDGET = "datachef_w_upload_preview"
+STAGE_NAV_WIDGET = "datachef_w_stage_nav"
 RESET_WIDGET = "datachef_w_reset"
 DIAGNOSE_WIDGET = "datachef_w_diagnose"
 SUBMIT_INTENT_WIDGET = "datachef_w_submit_intent"
@@ -171,6 +174,7 @@ __all__ = [
     "PII_WIDGET",
     "PLAN_COMMAND",
     "PREPARE_PLAN_WIDGET",
+    "PREVIEW_SYNC",
     "PREVIEW_WIDGET",
     "QUESTIONS_WIDGET",
     "REJECT_WIDGET",
@@ -183,9 +187,11 @@ __all__ = [
     "REVISE_ROW_LOSS_WIDGET",
     "REVISE_SUBMIT_WIDGET",
     "ROW_LOSS_WIDGET",
+    "STAGE_NAV_WIDGET",
     "SUBMIT_INTENT_WIDGET",
     "SUGGESTED_QUESTIONS_WIDGET",
     "UPLOADER_WIDGET",
+    "UPLOAD_PREVIEW_WIDGET",
     "WIDGET_NAMESPACE",
     "apply_pending_reset",
     "clear_action_commands",

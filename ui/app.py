@@ -18,6 +18,7 @@ if PROJECT_ROOT not in sys.path:
 import streamlit as st
 
 from datachef.application import ScreenId
+from datachef.application.session import screen_for_workflow_stage
 from ui import state as ui_state
 from ui.screens import render_screen
 
@@ -28,11 +29,13 @@ LOGO_PATH = os.path.join(
     "Gemini_Generated_Image_adhg9madhg9madhg.png",
 )
 
+# Display labels only. ScreenId values and every stage->screen mapping are
+# unchanged; this tuple is the presentation order of the six stages.
 _PROGRESS = (
     (ScreenId.UPLOAD, "1 · Upload"),
-    (ScreenId.INTENT, "2 · Intent"),
+    (ScreenId.INTENT, "2 · Objective"),
     (ScreenId.PLAN, "3 · Plan"),
-    (ScreenId.APPROVAL, "4 · Approval"),
+    (ScreenId.APPROVAL, "4 · Approve"),
     (ScreenId.QA, "5 · Quality"),
     (ScreenId.RESULTS, "6 · Results"),
 )
@@ -41,26 +44,60 @@ _ORDER = {screen: index for index, (screen, _) in enumerate(_PROGRESS)}
 _ORDER[ScreenId.DIAGNOSE] = 0
 
 
+def _reached_position(session) -> int:
+    """Furthest stage the workflow itself has reached.
+
+    Derived from the workflow stage through the existing public
+    ``screen_for_workflow_stage`` mapping, so the UI never invents its own
+    notion of progress. Combined with the controller's current screen so that
+    navigating back does not hide the stages already earned.
+    """
+
+    positions = [_ORDER.get(session.screen, 0)]
+    runtime = session.workflow_runtime
+    if runtime is not None:
+        positions.append(_ORDER[screen_for_workflow_stage(runtime.state.stage)])
+    return max(positions)
+
+
+def _render_stage_indicator(controller, session) -> None:
+    current = _ORDER.get(session.screen, 0)
+    reached = _reached_position(session)
+    st.sidebar.markdown("### Progress")
+    for screen, label in _PROGRESS:
+        position = _ORDER[screen]
+        if position == current:
+            st.sidebar.markdown(f"**➡️ {label}**")
+        elif position <= reached:
+            # Revisiting an already-reached stage. Navigation authorizes nothing:
+            # each screen re-derives what it may show from controller evidence.
+            if st.sidebar.button(
+                f"✅ {label}",
+                key=f"{ui_state.STAGE_NAV_WIDGET}_{screen.value}",
+                use_container_width=True,
+            ):
+                controller.navigate(screen)
+                st.rerun()
+        else:
+            st.sidebar.markdown(f"◻️ {label}")
+
+
 def _render_sidebar(controller, state) -> None:
     session = controller.session
     st.sidebar.title("DataChef")
     st.sidebar.caption("Offline, deterministic, human-approved data preparation.")
 
-    current = _ORDER.get(session.screen, 0)
-    st.sidebar.markdown("### Progress")
-    for screen, label in _PROGRESS:
-        position = _ORDER[screen]
-        if position < current:
-            st.sidebar.markdown(f"✅ {label}")
-        elif position == current:
-            st.sidebar.markdown(f"**➡️ {label}**")
-        else:
-            st.sidebar.markdown(f"◻️ {label}")
+    _render_stage_indicator(controller, session)
 
     st.sidebar.markdown("---")
+    # The controller flag is the single source of truth. When it is changed from
+    # another control (the upload screen), seed this toggle's widget state once
+    # before it is instantiated so the two never fight over ownership.
+    if state.get(ui_state.PREVIEW_SYNC) != session.preview_enabled:
+        state[ui_state.PREVIEW_WIDGET] = session.preview_enabled
+        state[ui_state.PREVIEW_SYNC] = session.preview_enabled
     preview = st.sidebar.toggle(
         "Show local data preview",
-        value=session.preview_enabled,
         key=ui_state.PREVIEW_WIDGET,
         help=(
             "Preview rows are presentation only. They never enter evidence, "
@@ -69,6 +106,7 @@ def _render_sidebar(controller, state) -> None:
     )
     if preview != session.preview_enabled:
         controller.set_preview_enabled(preview)
+        state[ui_state.PREVIEW_SYNC] = preview
 
     st.sidebar.markdown("---")
     if st.sidebar.button(
@@ -100,7 +138,7 @@ def run_app() -> None:
     session = controller.session
     st.title("DataChef")
     st.caption(
-        "Upload → Intent → Plan → Approval → Quality → Results. "
+        "Upload → Objective → Plan → Approve → Quality → Results. "
         "Nothing leaves this machine and no plan runs without your approval."
     )
     render_screen(session.screen, controller, state)
