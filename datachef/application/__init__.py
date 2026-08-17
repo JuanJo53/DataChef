@@ -1,5 +1,21 @@
 """Supported framework-independent Phase 1B application boundaries."""
 
+from datachef.application.artifacts import (
+    ARTIFACT_SCHEMA_VERSION,
+    ArtifactFailure,
+    ArtifactFailureCode,
+    ArtifactKind,
+    ArtifactSet,
+    DownloadArtifact,
+    build_artifact_set,
+)
+from datachef.application.dashboard import (
+    DashboardContext,
+    DashboardFailure,
+    DashboardFailureCode,
+    DashboardHandoff,
+    build_dashboard_handoff,
+)
 from datachef.application.models import (
     ApplicationFinding,
     CommandAttempt,
@@ -30,13 +46,25 @@ from datachef.application.session import ApplicationSession
 from datachef.application.controller import DataChefController
 
 __all__ = [
+    "ARTIFACT_SCHEMA_VERSION",
     "ApplicationFinding",
     "ApplicationSession",
+    "ArtifactFailure",
+    "ArtifactFailureCode",
+    "ArtifactKind",
+    "ArtifactSet",
     "CommandAttempt",
     "CommandKind",
     "CommandOutcome",
     "CsvParserOptions",
+    "DashboardContext",
+    "DashboardFailure",
+    "DashboardFailureCode",
+    "DashboardHandoff",
     "DataChefController",
+    "DownloadArtifact",
+    "build_artifact_set",
+    "build_dashboard_handoff",
     "JsonLinesParserOptions",
     "JsonRecordsParserOptions",
     "ParsedDataset",

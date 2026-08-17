@@ -9,6 +9,16 @@ from uuid import uuid4
 
 import pandas as pd
 
+from datachef.application.artifacts import (
+    ArtifactFailure,
+    ArtifactSet,
+    build_artifact_set,
+)
+from datachef.application.dashboard import (
+    DashboardFailure,
+    DashboardHandoff,
+    build_dashboard_handoff,
+)
 from datachef.application.models import (
     ApplicationFinding,
     CommandAttempt,
@@ -49,6 +59,7 @@ from datachef.contracts import (
     OperationType,
     PIIHandling,
     QAStatus,
+    SuggestedQuestion,
     WorkflowState,
     WorkflowStage,
     UserIntent,
@@ -991,6 +1002,42 @@ class DataChefController:
             ),
         )
         return self._transition(changed=True, code="EXECUTION_COMPLETED")
+
+    def _gold_runtime(self) -> WorkflowRuntime | None:
+        """Return a defensive copy of the authoritative runtime, still source-bound."""
+
+        runtime = self._session.workflow_runtime
+        source = self._session.source
+        if runtime is None or source is None:
+            return None
+        if runtime.state.dataset_identity != source.identity:
+            return None
+        return defensive_runtime_snapshot(runtime)
+
+    def _selected_questions(self) -> tuple[SuggestedQuestion, ...]:
+        suggested = self._session.suggested_questions
+        selected = set(self._session.selected_question_ids)
+        if not selected:
+            return ()
+        return tuple(item for item in suggested if item.question_id in selected)
+
+    def build_artifacts(self) -> ArtifactSet | ArtifactFailure:
+        """Build the complete download bundle without mutating session state."""
+
+        source = self._session.source
+        if source is None:
+            return build_artifact_set(None, None)
+        return build_artifact_set(self._gold_runtime(), source.metadata)
+
+    def build_dashboard_handoff(self) -> DashboardHandoff | DashboardFailure:
+        """Adapt the deterministic team dashboard builder for verified gold."""
+
+        intent = self._session.intent
+        return build_dashboard_handoff(
+            self._gold_runtime(),
+            intent,
+            selected_questions=self._selected_questions(),
+        )
 
     def set_preview_enabled(self, enabled: bool) -> TransitionResult:
         previous = self._session
