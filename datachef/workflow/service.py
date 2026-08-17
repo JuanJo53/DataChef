@@ -17,7 +17,7 @@ from datachef.contracts import (
     WorkflowStage,
     WorkflowState,
 )
-from datachef.diagnostics import diagnose_raw_dataframe
+from datachef.diagnostics import dataframe_fingerprint, diagnose_raw_dataframe
 from datachef.intent import discover_questions
 from datachef.planning import (
     Planner,
@@ -321,3 +321,130 @@ def execute_workflow(
         user_intent=runtime.user_intent,
         column_alias_map=runtime.column_alias_map,
     )
+
+
+def _snapshot_runtime(runtime: WorkflowRuntime) -> WorkflowRuntime:
+    """Take a validated, frame-independent snapshot of runtime evidence."""
+
+    state = WorkflowState.model_validate(runtime.state.model_dump())
+    return WorkflowRuntime(
+        state=state,
+        raw_dataframe=runtime.raw_dataframe.copy(deep=True),
+        transformed_dataframe=(
+            runtime.transformed_dataframe.copy(deep=True)
+            if runtime.transformed_dataframe is not None
+            else None
+        ),
+        gold_dataframe=(
+            runtime.gold_dataframe.copy(deep=True)
+            if runtime.gold_dataframe is not None
+            else None
+        ),
+        user_intent=runtime.user_intent,
+        column_alias_map=runtime.column_alias_map,
+    )
+
+
+def _frames_match(
+    expected: pd.DataFrame | None,
+    candidate: pd.DataFrame | None,
+) -> bool:
+    if expected is None or candidate is None:
+        return expected is candidate
+    return bool(
+        dataframe_fingerprint(expected) == dataframe_fingerprint(candidate)
+        and expected.equals(candidate)
+    )
+
+
+def _runtimes_match(expected: WorkflowRuntime, candidate: WorkflowRuntime) -> bool:
+    return bool(
+        expected.state == candidate.state
+        and expected.user_intent == candidate.user_intent
+        and expected.column_alias_map == candidate.column_alias_map
+        and _frames_match(expected.raw_dataframe, candidate.raw_dataframe)
+        and _frames_match(
+            expected.transformed_dataframe,
+            candidate.transformed_dataframe,
+        )
+        and _frames_match(expected.gold_dataframe, candidate.gold_dataframe)
+    )
+
+
+def verify_completed_workflow_runtime(
+    pre_execution: WorkflowRuntime,
+    candidate: WorkflowRuntime,
+    *,
+    user_invariants: tuple[QualityInvariant, ...] = (),
+) -> WorkflowRuntime | None:
+    """Authenticate a candidate by deterministic execution and QA replay.
+
+    The candidate is untrusted. Both runtimes are snapshotted, the approved
+    workflow is independently executed from the authoritative raw snapshot,
+    and QA is also recomputed against the candidate's exact transformed frame.
+    Only a fully equivalent result is returned, as another defensive copy.
+    """
+
+    if not isinstance(pre_execution, WorkflowRuntime) or not isinstance(
+        candidate, WorkflowRuntime
+    ):
+        return None
+    try:
+        prepared = _snapshot_runtime(pre_execution)
+        supplied = _snapshot_runtime(candidate)
+        if prepared.state.stage is not WorkflowStage.AWAITING_APPROVAL:
+            return None
+        approval = supplied.state.human_approval
+        if approval is None:
+            return None
+
+        expected = execute_workflow(
+            prepared,
+            approval,
+            user_invariants=user_invariants,
+        )
+        if expected is prepared or expected.state.stage is WorkflowStage.AWAITING_APPROVAL:
+            return None
+
+        if supplied.state.stage in {
+            WorkflowStage.QA_PASSED,
+            WorkflowStage.QA_WARNING,
+            WorkflowStage.QA_FAILED,
+        }:
+            source_state = prepared.state
+            transformed = supplied.transformed_dataframe
+            execution = supplied.state.execution_result
+            supplied_qa = supplied.state.qa_report
+            if (
+                transformed is None
+                or execution is None
+                or supplied_qa is None
+                or source_state.diagnostic_report is None
+                or source_state.planning_context is None
+                or source_state.transformation_plan is None
+                or source_state.plan_validation is None
+                or source_state.accepted_review is None
+                or prepared.user_intent is None
+            ):
+                return None
+            recomputed_qa = run_quality_assurance(
+                prepared.raw_dataframe,
+                transformed,
+                execution,
+                source_state.diagnostic_report,
+                source_state.planning_context,
+                prepared.user_intent,
+                source_state.transformation_plan,
+                source_state.plan_validation,
+                source_state.accepted_review,
+                approval,
+                user_invariants=user_invariants,
+            )
+            if recomputed_qa != supplied_qa:
+                return None
+
+        if not _runtimes_match(expected, supplied):
+            return None
+        return _snapshot_runtime(supplied)
+    except Exception:
+        return None

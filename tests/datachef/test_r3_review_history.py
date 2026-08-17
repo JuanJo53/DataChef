@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 import pytest
+from pandas.testing import assert_frame_equal
 from pydantic import ValidationError
 
 import datachef.transform as transform_api
@@ -202,6 +203,7 @@ def test_runtime_refuses_unvalidated_empty_history_before_executor_or_qa(
     monkeypatch,
 ) -> None:
     runtime = _prepared()
+    source_before = runtime.raw_dataframe.copy(deep=True)
     bypass_state = runtime.state.model_copy(update={"review_history": ()})
     bypass_runtime = WorkflowRuntime(
         state=bypass_state,
@@ -229,6 +231,15 @@ def test_runtime_refuses_unvalidated_empty_history_before_executor_or_qa(
     assert refused is bypass_runtime
     assert calls == {"executor": 0, "qa": 0}
     assert refused.gold_dataframe is None
+    assert_frame_equal(runtime.raw_dataframe, source_before)
+
+
+def test_empty_review_history_cannot_reconstruct_from_json() -> None:
+    runtime = _prepared()
+    bypass_state = runtime.state.model_copy(update={"review_history": ()})
+
+    with pytest.raises(ValidationError):
+        WorkflowState.model_validate_json(bypass_state.model_dump_json())
 
 
 def test_lower_level_executor_is_not_application_facing() -> None:
