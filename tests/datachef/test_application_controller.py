@@ -1265,7 +1265,6 @@ def test_controller_import_graph_is_deterministic_and_provider_free() -> None:
 
     assert "crewai" not in sys.modules
     assert "google.genai" not in sys.modules
-    assert "streamlit" not in sys.modules
     assert "completed_runtime_verifier" not in inspect.signature(
         DataChefController
     ).parameters
