@@ -21,13 +21,29 @@ ENV/
 
 # Local config
 .env
-prompts/
+.env.*
+!.env.example
+prompts/local/
 
 # Data outputs
-data/
+data/local/
+data/baseline/
+data/generated/
+data/raw/
+data/processed/
+data/reports/
 
 # Logs
 *.log
+
+# Known local runtime artifacts
+latest_kickoff_task_outputs.db
+secret.key
+pipeline_prueba.py
+pipeline_transformacion.py
+
+# Test caches
+.pytest_cache/
 
 # IDE files
 .vscode/

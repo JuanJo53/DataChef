@@ -1,0 +1,6 @@
+order_id,region,amount_text
+1001,North,10
+1002,South,20
+1002,South,20
+1003,West,30
+1004,East,bad
