@@ -26,6 +26,9 @@ from crew.transformation_agent.transformation_agent import (
 )
 from ui.charts import render_charts
 from ui.ingestion_view import render_ingestion
+from ui.styles import _apply_custom_styles
+
+
 
 
 def _to_gold(df: pd.DataFrame) -> pd.DataFrame:
@@ -89,7 +92,9 @@ def _demo_dataframe():
     )
 
 
+
 def _render_stage_nav():
+
     stages = [
         "1. Upload",
         "2. Diagnose",
@@ -98,55 +103,163 @@ def _render_stage_nav():
     ]
 
     st.sidebar.title("Workflow")
+
+    current_stage = st.session_state["stage"]
+
     for index, label in enumerate(stages):
+
+        button_type = (
+            "primary"
+            if index == current_stage
+            else "secondary"
+        )
+
         if st.sidebar.button(
-            label, key=f"nav_{index}", use_container_width=True
+            label,
+            key=f"nav_{index}",
+            use_container_width=True,
+            type=button_type,
         ):
+
             st.session_state["stage"] = index
 
+            st.rerun()
+
     st.sidebar.markdown("---")
-    st.sidebar.caption("DataChef Agentic Platform")
+
+    st.sidebar.caption(
+        "DataChef Agentic Platform"
+    )
 
 
 def _render_upload_stage():
+
     st.header("Stage 1: Ingest and diagnose")
     st.subheader("Upload a raw dataset")
 
-    uploaded_file = st.file_uploader(
-        "Choose a CSV or JSON file", type=["csv", "json"]
-    )
-    col1, col2 = st.columns([1, 1])
+    # =====================================================
+    # UPLOAD AREA
+    # =====================================================
 
-    with col1:
-        if st.button("Load demo dataset", use_container_width=True):
+    uploaded_file = st.file_uploader(
+        "Choose a CSV or JSON file",
+        type=["csv", "json"],
+        label_visibility="collapsed",
+    )
+
+    st.markdown(
+        "<div style='height: 100px;'></div>",
+        unsafe_allow_html=True,
+    )
+
+    # =====================================================
+    # DEMO DATASET BUTTON
+    # =====================================================
+
+    col1, col2, col3 = st.columns([1, 2, 1])
+
+    with col2:
+        if st.button(
+            "Load demo dataset",
+            use_container_width=True,
+        ):
             st.session_state["raw_df"] = _demo_dataframe()
             st.session_state["uploaded_file"] = "demo_orders.csv"
             st.success("Demo dataset loaded.")
 
+    # =====================================================
+    # READ FILE
+    # =====================================================
+
     if uploaded_file is not None:
+
         st.session_state["uploaded_file"] = uploaded_file.name
+
         if uploaded_file.name.endswith(".csv"):
             st.session_state["raw_df"] = pd.read_csv(uploaded_file)
+
         else:
             st.session_state["raw_df"] = pd.read_json(uploaded_file)
 
+    # =====================================================
+    # DATASET LOADED
+    # =====================================================
+
     if st.session_state["raw_df"] is not None:
-        st.success(f"Loaded: {st.session_state['uploaded_file']}")
-        st.dataframe(
-            st.session_state["raw_df"].head(10), use_container_width=True
+
+        df = st.session_state["raw_df"]
+
+        st.markdown(
+            "<div style='height: 20px;'></div>",
+            unsafe_allow_html=True,
         )
+
+        st.success(
+            f"Loaded: {st.session_state['uploaded_file']}"
+        )
+
+        # =================================================
+        # DATA PREVIEW
+        # =================================================
+
+        st.markdown("### Data preview")
+
+        st.dataframe(
+            df.head(10),
+            use_container_width=True,
+            height=300,
+        )
+
+        st.markdown(
+            "<div style='height: 15px;'></div>",
+            unsafe_allow_html=True,
+        )
+
+        # =================================================
+        # OVERVIEW
+        # =================================================
 
         st.markdown("### Dataset overview")
+
         col_a, col_b, col_c = st.columns(3)
-        col_a.metric("Rows", len(st.session_state["raw_df"]))
-        col_b.metric("Columns", st.session_state["raw_df"].shape[1])
-        col_c.metric(
-            "Data types", str(st.session_state["raw_df"].dtypes.nunique())
+
+        with col_a:
+            st.metric(
+                "Rows",
+                len(df),
+            )
+
+        with col_b:
+            st.metric(
+                "Columns",
+                df.shape[1],
+            )
+
+        with col_c:
+            st.metric(
+                "Data types",
+                df.dtypes.nunique(),
+            )
+
+        st.markdown(
+            "<div style='height: 18px;'></div>",
+            unsafe_allow_html=True,
         )
 
-        if st.button("Analyze data", type="primary"):
-            st.session_state["stage"] = 1
-            st.rerun()
+        # =================================================
+        # ANALYZE BUTTON
+        # =================================================
+
+        col_left, col_center, col_right = st.columns([1, 2, 1])
+
+        with col_center:
+            if st.button(
+                "Analyze data →",
+                type="primary",
+                use_container_width=True,
+            ):
+                st.session_state["stage"] = 1
+                st.rerun()
 
 
 def _render_diagnose_stage():
@@ -302,17 +415,33 @@ def _render_dashboard_stage():
 def run_app():
     st.set_page_config(page_title="DataChef", page_icon=LOGO_PATH, layout="wide")
 
-    st.logo(LOGO_PATH, size="large")
+    with st.sidebar:
+        st.image(LOGO_PATH, width=200)
 
     _init_state()
     _render_stage_nav()
+    _apply_custom_styles()
 
     _, mid, _ = st.columns([1, 2, 1])
     with mid:
         st.image(LOGO_PATH, width="stretch")
-        st.caption(
-            "Agentic workflow for ingestion, transformation, and dashboarding"
-        )
+    st.markdown(
+    """
+        <p style="
+            text-align: center;
+            font-family: 'Oxanium', sans-serif;
+            font-size: 25px;
+            font-weight: 500;
+            color: #B9B7D0;
+            letter-spacing: 1px;
+            margin-top: -12px;
+            margin-bottom: 8px;
+        ">
+            Agentic workflow for ingestion, transformation, and dashboarding
+        </p>
+        """,
+        unsafe_allow_html=True,
+    )
 
     stage = st.session_state["stage"]
     if stage == 0:
