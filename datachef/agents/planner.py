@@ -71,8 +71,9 @@ class AgentPlanner:
                 invocations=(),
             )
 
+        notices: tuple[AgentOutcome, ...] = ()
         try:
-            plan, invocations = self._run_live(context, decision.model_name)
+            plan, invocations, notices = self._run_live(context, decision.model_name)
             self._assert_contract(context, plan)
         except Exception:  # noqa: BLE001 - every failure has the same safe answer
             return self._fall_back(
@@ -96,6 +97,7 @@ class AgentPlanner:
                 validation_codes=tuple(
                     finding.code for finding in validation.findings
                 ),
+                notices=notices,
             )
 
         self.trace = self.trace.with_attempt(
@@ -104,6 +106,7 @@ class AgentPlanner:
                 agent="planner",
                 outcome_code=AgentOutcome.AGENT_PLAN_ACCEPTED,
                 tool_invocations=invocations,
+                notices=notices,
                 elapsed_ms=self._elapsed(started),
             )
         )
@@ -116,10 +119,15 @@ class AgentPlanner:
         runner = self._runner
         if runner is None:
             llm = build_llm(model_name or "")
-            result = run_planning_crew(context, llm)
+            result = run_planning_crew(context, llm, self.timeout_seconds)
         else:
             result = runner(context)  # type: ignore[operator]
-        return result.plan, tuple(result.draft.invocations)
+        notices = (
+            (AgentOutcome.AGENT_RUNTIME_CLEANUP_DEFERRED,)
+            if getattr(result, "cleanup_deferred", False)
+            else ()
+        )
+        return result.plan, tuple(result.draft.invocations), notices
 
     def _assert_contract(self, context: PlanningContext, plan: TransformationPlan) -> None:
         """We re-derive identity ourselves; the agent never authors one."""
@@ -141,6 +149,7 @@ class AgentPlanner:
         outcome: AgentOutcome,
         invocations: tuple,
         validation_codes: tuple[str, ...] = (),
+        notices: tuple[AgentOutcome, ...] = (),
     ) -> TransformationPlan:
         self.trace = self.trace.model_copy(update={"fallback_reason_code": outcome})
         self.trace = self.trace.with_attempt(
@@ -150,6 +159,7 @@ class AgentPlanner:
                 outcome_code=outcome,
                 tool_invocations=invocations,
                 validation_codes=validation_codes,
+                notices=notices,
                 elapsed_ms=self._elapsed(started),
             )
         )

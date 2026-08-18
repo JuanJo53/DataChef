@@ -90,6 +90,15 @@ def _render_sidebar(controller, state) -> None:
     _render_stage_indicator(controller, session)
 
     st.sidebar.markdown("---")
+    registry = ui_state.agent_registry(state)
+    if registry is not None and registry.live:
+        st.sidebar.markdown("**Planner:** 🤖 AI planner")
+        st.sidebar.caption("CrewAI crew, working inside the deterministic allow-list.")
+    else:
+        st.sidebar.markdown("**Planner:** ⚙️ deterministic")
+        st.sidebar.caption("Rule-based planner. No provider is contacted.")
+
+    st.sidebar.markdown("---")
     # The controller flag is the single source of truth. When it is changed from
     # another control (the upload screen), seed this toggle's widget state once
     # before it is instantiated so the two never fight over ownership.
@@ -121,8 +130,29 @@ def _render_sidebar(controller, state) -> None:
     )
 
 
+def _load_local_configuration() -> None:
+    """Make .env visible to this process without overriding the real environment.
+
+    Nothing else on the DataChef path loads it, so without this the credential
+    never reaches os.environ and live mode could never activate. ``override=False``
+    keeps any real environment variable authoritative, and .env ships
+    DATACHEF_OFFLINE=true, so the offline default is preserved. No value from the
+    file is ever printed, logged, or rendered.
+    """
+
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(os.path.join(PROJECT_ROOT, ".env"), override=False)
+    except Exception:
+        # A missing or unreadable .env simply leaves the environment as it was.
+        pass
+
+
 def run_app() -> None:
     st.set_page_config(page_title="DataChef", layout="wide")
+
+    _load_local_configuration()
 
     state = st.session_state
     # Reset runs before any widget is instantiated so widget keys can be cleared.

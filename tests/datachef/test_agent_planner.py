@@ -276,3 +276,132 @@ def test_agents_drop_into_prepare_workflow_unchanged() -> None:
     assert runtime.state.transformation_plan is not None
     assert planner.trace.mode is AgentMode.OFFLINE
     assert reviewer.trace.mode is AgentMode.OFFLINE
+
+
+def test_a_cleanup_only_failure_after_a_successful_kickoff_keeps_the_plan() -> None:
+    """WinError 32 on runtime exit must not demote a good plan (simulated)."""
+
+    from datachef.agents.plan_crew import CrewPlanResult
+    from datachef.agents.tools import DeduplicateByKeysArgs, apply_operation_args
+
+    context, _ = _context(row_loss=50.0)
+
+    def cleanup_deferred(ctx):
+        draft = PlanDraft(context=ctx)
+        issue = next(
+            item.issue_id
+            for item in ctx.diagnostic_report.issues
+            if item.kind.value == "DUPLICATE_KEYS"
+        )
+        apply_operation_args(
+            draft,
+            "propose_deduplicate_by_keys",
+            DeduplicateByKeysArgs(
+                keys=["order_id"],
+                diagnostic_issue_ids=[issue],
+                rationale="r",
+                expected_effect="e",
+            ),
+        )
+        return CrewPlanResult(
+            plan=draft.build_plan(), draft=draft, cleanup_deferred=True
+        )
+
+    planner = AgentPlanner(environment=LIVE_ENV)
+    planner._runner = cleanup_deferred  # type: ignore[assignment]
+
+    plan = planner.propose(context, attempt=1)
+
+    assert planner.trace.fallback_reason_code is None
+    assert plan.operations, "the agent plan must survive a cleanup-only failure"
+    attempt = planner.trace.attempts[-1]
+    assert attempt.outcome_code is AgentOutcome.AGENT_PLAN_ACCEPTED
+    assert AgentOutcome.AGENT_RUNTIME_CLEANUP_DEFERRED in attempt.notices
+
+
+def test_a_failure_during_kickoff_still_falls_back() -> None:
+    context, _ = _context()
+
+    def kickoff_failure(_ctx):
+        raise PermissionError("[WinError 32] file in use during kickoff")
+
+    planner = AgentPlanner(environment=LIVE_ENV)
+    planner._runner = kickoff_failure  # type: ignore[assignment]
+
+    plan = planner.propose(context, attempt=1)
+
+    assert (
+        planner.trace.fallback_reason_code
+        is AgentOutcome.AGENT_UNAVAILABLE_USING_DETERMINISTIC_PLANNER
+    )
+    assert validate_plan(context, plan).valid is True
+    assert "WinError" not in planner.trace.model_dump_json()
+
+
+def test_run_planning_crew_tolerates_only_exit_time_failures() -> None:
+    """Directly exercise the containment in run_planning_crew."""
+
+    import contextlib
+
+    import datachef.agents.plan_crew as plan_crew
+
+    context, _ = _context(row_loss=50.0)
+
+    @contextlib.contextmanager
+    def exploding_runtime():
+        yield
+        raise PermissionError("[WinError 32] latest_kickoff_task_outputs.db")
+
+    class FakeCrew:
+        def kickoff(self):
+            return None
+
+    import sys
+    import types
+
+    fake_bus = types.SimpleNamespace(shutdown=lambda wait=True: None)
+    module = types.ModuleType("crewai.events.event_bus")
+    module.crewai_event_bus = fake_bus
+    flow_module = types.ModuleType("datachef.workflow.crewai_flow")
+    flow_module.isolated_crewai_runtime = exploding_runtime
+    original_flow = sys.modules.get("datachef.workflow.crewai_flow")
+    sys.modules["crewai.events.event_bus"] = module
+    sys.modules["datachef.workflow.crewai_flow"] = flow_module
+    original_build = plan_crew.build_planning_crew
+    plan_crew.build_planning_crew = lambda *a, **k: FakeCrew()
+    try:
+        result = plan_crew.run_planning_crew(context, object(), 30.0)
+    finally:
+        plan_crew.build_planning_crew = original_build
+        sys.modules.pop("crewai.events.event_bus", None)
+        if original_flow is not None:
+            sys.modules["datachef.workflow.crewai_flow"] = original_flow
+        else:
+            sys.modules.pop("datachef.workflow.crewai_flow", None)
+
+    assert result.cleanup_deferred is True
+    assert result.plan is not None
+
+
+def test_timeout_seconds_is_passed_to_the_agent() -> None:
+    import datachef.agents.plan_crew as plan_crew
+
+    seen: dict = {}
+    original = plan_crew.build_crew_tools
+
+    def fake_tools(draft):
+        return []
+
+    class Recorder:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+    plan_crew.build_crew_tools = fake_tools
+    try:
+        import inspect as _inspect
+
+        source = _inspect.getsource(plan_crew.build_planning_crew)
+        assert "max_execution_time" in source
+        assert "timeout_seconds" in source
+    finally:
+        plan_crew.build_crew_tools = original

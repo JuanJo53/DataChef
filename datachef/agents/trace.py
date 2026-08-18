@@ -35,6 +35,7 @@ class AgentOutcome(StrEnum):
     AGENT_CONTRACT_VIOLATION_USING_DETERMINISTIC_PLANNER = (
         "AGENT_CONTRACT_VIOLATION_USING_DETERMINISTIC_PLANNER"
     )
+    AGENT_RUNTIME_CLEANUP_DEFERRED = "AGENT_RUNTIME_CLEANUP_DEFERRED"
     AGENT_OFFLINE_USING_DETERMINISTIC_REVIEWER = (
         "AGENT_OFFLINE_USING_DETERMINISTIC_REVIEWER"
     )
@@ -51,6 +52,9 @@ class ToolInvocation(StrictTraceModel):
     reason_code: str | None = None
     operation_type: str | None = None
     target_columns: tuple[str, ...] = ()
+    # What the deterministic critic replied, when this call was an estimate.
+    critic_finding_codes: tuple[str, ...] = ()
+    estimated_row_loss_pct: float | None = None
 
 
 class AttemptTrace(StrictTraceModel):
@@ -59,6 +63,7 @@ class AttemptTrace(StrictTraceModel):
     outcome_code: AgentOutcome
     tool_invocations: tuple[ToolInvocation, ...] = ()
     validation_codes: tuple[str, ...] = ()
+    notices: tuple[AgentOutcome, ...] = ()
     elapsed_ms: float = Field(ge=0)
 
 

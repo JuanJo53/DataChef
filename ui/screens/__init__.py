@@ -78,6 +78,44 @@ def render_diagnosis(session: Any) -> None:
         )
 
 
+def render_validation(state_evidence: Any, intent: Any) -> None:
+    """Show the validation facts the application already produced.
+
+    This renders evidence only: codes, messages, operation IDs, and numbers.
+    It never recommends a threshold or interprets the outcome.
+    """
+
+    validation = state_evidence.plan_validation
+    if validation is None:
+        return
+    st.markdown("### Validation")
+    left, right = st.columns(2)
+    left.metric(
+        "Estimated cumulative row loss",
+        f"{validation.cumulative_estimated_row_loss_pct:.2f}%",
+    )
+    if intent is not None:
+        right.metric(
+            "Your acceptable row loss",
+            f"{intent.acceptable_row_loss_pct:.2f}%",
+        )
+    if validation.row_loss_estimates:
+        st.markdown("#### Estimated row removal per operation")
+        for estimate in validation.row_loss_estimates:
+            st.markdown(
+                f"- `{estimate.operation_id}` — {estimate.estimated_rows} row(s), "
+                f"{estimate.estimated_pct:.2f}%"
+            )
+    if validation.findings:
+        st.markdown("#### Validation findings")
+        for finding in validation.findings:
+            operation = f" (`{finding.operation_id}`)" if finding.operation_id else ""
+            st.markdown(
+                f"- `{finding.severity.value}` **{finding.code}**{operation} — "
+                f"{finding.message}"
+            )
+
+
 def render_findings(findings: Any) -> None:
     """Render sanitized application findings only; never exception text."""
 
@@ -136,5 +174,6 @@ __all__ = [
     "render_failure",
     "render_findings",
     "render_result",
+    "render_validation",
     "render_screen",
 ]

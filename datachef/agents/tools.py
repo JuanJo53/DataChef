@@ -42,6 +42,7 @@ ALIASED = "ALIASED_COLUMN_NOT_EXECUTABLE"
 MISSING_COLUMN = "MISSING_COLUMN"
 UNKNOWN_ISSUE = "UNKNOWN_DIAGNOSTIC_ISSUE"
 EMPTY_TARGETS = "EMPTY_TARGET_COLUMNS"
+INVALID_KEY = "INVALID_KEY"
 
 
 @dataclass
@@ -148,6 +149,21 @@ def guard_columns(draft: PlanDraft, columns: tuple[str, ...]) -> str | None:
     return None
 
 
+def guard_dedup_keys(draft: PlanDraft, keys: tuple[str, ...]) -> str | None:
+    """Refuse a key set the estimator cannot price.
+
+    ``key_duplicate_metrics`` holds only nominated key sets, so a dedup on any
+    other column would be estimated at zero rows removed. Refusing here makes
+    the unpriceable operation unrepresentable rather than merely mispriced.
+    """
+
+    known = {
+        tuple(metric.key_columns)
+        for metric in draft.context.diagnostic_report.key_duplicate_metrics
+    }
+    return None if tuple(keys) in known else INVALID_KEY
+
+
 def guard_issues(draft: PlanDraft, issue_ids: tuple[str, ...]) -> str | None:
     if any(issue_id not in draft.known_issue_ids for issue_id in issue_ids):
         return UNKNOWN_ISSUE
@@ -171,6 +187,8 @@ def propose(
         reason = EMPTY_TARGETS
     if reason is None and target_columns:
         reason = guard_columns(draft, target_columns)
+    if reason is None and operation_type is OperationType.DEDUPLICATE_BY_KEYS:
+        reason = guard_dedup_keys(draft, target_columns)
     if reason is None:
         reason = guard_issues(draft, issue_ids)
     if reason is None and not issue_ids:
@@ -216,6 +234,7 @@ def inspect_profile(draft: PlanDraft) -> dict[str, Any]:
 
     context = draft.context
     report = context.diagnostic_report
+    draft.record(ToolInvocation(tool_name="inspect_profile", accepted=True))
     return {
         "columns": [
             {"name": column.name, "dtype": column.dtype}
@@ -254,6 +273,16 @@ def estimate_current_plan(draft: PlanDraft) -> dict[str, Any]:
     """The deterministic critic, in-loop. Codes and context names only."""
 
     validation = validate_plan(draft.context, draft.build_plan())
+    codes = tuple(finding.code for finding in validation.findings)
+    cumulative = round(validation.cumulative_estimated_row_loss_pct, 4)
+    draft.record(
+        ToolInvocation(
+            tool_name="estimate_current_plan",
+            accepted=validation.valid,
+            critic_finding_codes=codes,
+            estimated_row_loss_pct=cumulative,
+        )
+    )
     return {
         "operation_count": len(draft.operations),
         "valid": validation.valid,
@@ -424,6 +453,7 @@ __all__ = [
     "DropDuplicateRowsArgs",
     "EMPTY_TARGETS",
     "FinalizePlanArgs",
+    "INVALID_KEY",
     "MISSING_COLUMN",
     "NoArgs",
     "NormalizeMissingTokensArgs",
@@ -437,6 +467,7 @@ __all__ = [
     "estimate_current_plan",
     "finalize_plan",
     "guard_columns",
+    "guard_dedup_keys",
     "inspect_profile",
     "propose",
 ]

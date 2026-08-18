@@ -8,7 +8,12 @@ import streamlit as st
 
 from datachef.contracts import DiagnosticIssueKind, HumanDecision
 from ui import state as ui_state
-from ui.screens import has_blocking, render_findings, render_result
+from ui.screens import (
+    has_blocking,
+    render_findings,
+    render_result,
+    render_validation,
+)
 
 
 # The offline slice executes exactly these two operation families, so any other
@@ -68,6 +73,59 @@ def _render_plan_summary(evidence: Any, report: Any) -> None:
         )
 
 
+def _render_agent_trace(state: Any) -> None:
+    """Show what the planning crew did. Presentation only; decides nothing."""
+
+    registry = ui_state.agent_registry(state)
+    trace = getattr(registry, "trace", None) if registry else None
+    if trace is None:
+        st.caption("Planner: **deterministic** (rule-based, offline).")
+        return
+
+    fallback = trace.fallback_reason_code
+    if fallback is None:
+        st.caption("Planner: **AI planner** (CrewAI crew, inside the allow-list).")
+    else:
+        st.caption(
+            f"Planner: **deterministic** — the AI planner was not used "
+            f"(`{fallback.value}`)."
+        )
+
+    if not trace.attempts:
+        return
+    with st.expander("How this plan was produced"):
+        for attempt in trace.attempts:
+            st.markdown(
+                f"**Attempt {attempt.attempt}** · {attempt.agent} · "
+                f"`{attempt.outcome_code.value}` · {attempt.elapsed_ms:.0f} ms"
+            )
+            for notice in attempt.notices:
+                st.caption(f"Notice: `{notice.value}`")
+            if attempt.tool_invocations:
+                sequence = " → ".join(
+                    item.tool_name for item in attempt.tool_invocations
+                )
+                st.markdown(f"Tool sequence: {sequence}")
+                for item in attempt.tool_invocations:
+                    detail = f"- `{item.tool_name}`"
+                    if item.target_columns:
+                        detail += f" on {', '.join(item.target_columns)}"
+                    if not item.accepted and item.reason_code:
+                        detail += f" — refused `{item.reason_code}`"
+                    if item.estimated_row_loss_pct is not None:
+                        codes = ", ".join(item.critic_finding_codes) or "no findings"
+                        detail += (
+                            f" — critic replied {item.estimated_row_loss_pct:.2f}% "
+                            f"row loss, {codes}"
+                        )
+                    st.markdown(detail)
+            if attempt.validation_codes:
+                st.markdown(
+                    "Validation codes: "
+                    + ", ".join(f"`{code}`" for code in attempt.validation_codes)
+                )
+
+
 def _render_approval_record(approval: Any) -> None:
     st.success(
         f"Decision recorded: **{approval.decision.value}** for plan "
@@ -85,6 +143,10 @@ def render(controller: Any, state: Any) -> None:
         return
 
     _render_plan_summary(runtime.state, session.display_diagnostic_report)
+    # Informed, exact approval: the human sees what this plan is estimated to
+    # remove, beside the threshold they set, before they consent.
+    render_validation(runtime.state, session.intent)
+    _render_agent_trace(state)
     render_findings(session.findings)
 
     blocking = has_blocking(session.findings)

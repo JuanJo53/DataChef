@@ -398,3 +398,105 @@ def test_each_remaining_tool_routes_through_the_same_guarded_path(tool_name, arg
     # The invented issue id is refused by the same guard for every tool.
     assert result == {"accepted": False, "reason_code": UNKNOWN_ISSUE}
     assert draft.operations == []
+
+
+def test_a_dedup_on_a_column_with_no_duplicate_key_metric_is_refused() -> None:
+    """The estimator can only price nominated key sets (finding: row-loss blind spot)."""
+
+    context = _context(row_loss=50.0)
+    draft = PlanDraft(context=context)
+    issue = _issue_id(context, DiagnosticIssueKind.DUPLICATE_KEYS)
+    assert [item.key_columns for item in context.diagnostic_report.key_duplicate_metrics] == [
+        ("order_id",)
+    ]
+
+    result = apply_operation_args(
+        draft,
+        "propose_deduplicate_by_keys",
+        DeduplicateByKeysArgs(
+            keys=["amount"],
+            diagnostic_issue_ids=[issue],
+            rationale="r",
+            expected_effect="e",
+        ),
+    )
+
+    assert result == {"accepted": False, "reason_code": "INVALID_KEY"}
+    assert draft.operations == []
+    assert draft.invocations[-1].reason_code == "INVALID_KEY"
+
+
+def test_a_dedup_on_a_nominated_key_set_still_succeeds() -> None:
+    context = _context(row_loss=50.0)
+    draft = PlanDraft(context=context)
+    issue = _issue_id(context, DiagnosticIssueKind.DUPLICATE_KEYS)
+
+    result = apply_operation_args(
+        draft,
+        "propose_deduplicate_by_keys",
+        DeduplicateByKeysArgs(
+            keys=["order_id"],
+            diagnostic_issue_ids=[issue],
+            rationale="r",
+            expected_effect="e",
+        ),
+    )
+
+    assert result["accepted"] is True
+    assert len(draft.operations) == 1
+
+
+def test_the_trace_records_inspect_estimate_and_discard_in_order() -> None:
+    context = _context(row_loss=0.0)
+    draft = PlanDraft(context=context)
+    issue = _issue_id(context, DiagnosticIssueKind.DUPLICATE_KEYS)
+
+    inspect_profile(draft)
+    apply_operation_args(
+        draft,
+        "propose_deduplicate_by_keys",
+        DeduplicateByKeysArgs(
+            keys=["order_id"],
+            diagnostic_issue_ids=[issue],
+            rationale="r",
+            expected_effect="e",
+        ),
+    )
+    estimate_current_plan(draft)
+    discard_last_operation(draft)
+    finalize_plan(draft, "Leave the table unchanged.")
+
+    assert [item.tool_name for item in draft.invocations] == [
+        "inspect_profile",
+        "propose_deduplicate_by_keys",
+        "estimate_current_plan",
+        "discard_last_operation",
+        "finalize_plan",
+    ]
+    critic = draft.invocations[2]
+    assert critic.accepted is False
+    assert "ROW_LOSS_THRESHOLD" in critic.critic_finding_codes
+    assert critic.estimated_row_loss_pct == pytest.approx(33.3333, rel=1e-3)
+
+
+def test_the_trace_leaks_no_cell_value_key_path_or_exception_text() -> None:
+    context = _context(row_loss=0.0)
+    draft = PlanDraft(context=context)
+    issue = _issue_id(context, DiagnosticIssueKind.DUPLICATE_KEYS)
+    inspect_profile(draft)
+    apply_operation_args(
+        draft,
+        "propose_deduplicate_by_keys",
+        DeduplicateByKeysArgs(
+            keys=["order_id"],
+            diagnostic_issue_ids=[issue],
+            rationale="r",
+            expected_effect="e",
+        ),
+    )
+    estimate_current_plan(draft)
+
+    rendered = " ".join(item.model_dump_json() for item in draft.invocations)
+
+    for leak in ("'u'", "'v'", "AIza", "C:\\", "C:/", "Traceback", "gemini-", "imgUrl"):
+        assert leak not in rendered

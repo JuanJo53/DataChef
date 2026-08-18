@@ -40,6 +40,10 @@ class PlanEnvelope(BaseModel):
 class CrewPlanResult:
     plan: TransformationPlan
     draft: PlanDraft
+    # True when the kickoff succeeded but the isolated runtime could not clean
+    # itself up (Windows holds latest_kickoff_task_outputs.db open). The plan is
+    # still valid; the notice is surfaced in the trace rather than swallowed.
+    cleanup_deferred: bool = False
 
 
 def _make_operation_tool(base_tool_cls, draft: PlanDraft, tool_name, operation_type, args_model):
@@ -141,7 +145,12 @@ def build_plan_guardrail(draft: PlanDraft):
     return guardrail
 
 
-def build_planning_crew(context: PlanningContext, draft: PlanDraft, llm: Any) -> Any:
+def build_planning_crew(
+    context: PlanningContext,
+    draft: PlanDraft,
+    llm: Any,
+    timeout_seconds: float | None = None,
+) -> Any:
     """Construct the sequential planning crew. Caller owns runtime isolation."""
 
     from crewai import Agent, Crew, Process, Task
@@ -162,6 +171,7 @@ def build_planning_crew(context: PlanningContext, draft: PlanDraft, llm: Any) ->
         llm=llm,
         allow_delegation=False,
         verbose=False,
+        max_execution_time=int(timeout_seconds) if timeout_seconds else None,
     )
     task = Task(
         description=(
@@ -185,25 +195,47 @@ def build_planning_crew(context: PlanningContext, draft: PlanDraft, llm: Any) ->
     )
 
 
-def run_planning_crew(context: PlanningContext, llm: Any) -> CrewPlanResult:
-    """Run one crew inside an isolated runtime and return the server-side plan."""
+def run_planning_crew(
+    context: PlanningContext,
+    llm: Any,
+    timeout_seconds: float | None = None,
+) -> CrewPlanResult:
+    """Run one crew inside an isolated runtime and return the server-side plan.
+
+    The runtime's own cleanup can raise on exit while CrewAI still holds its
+    task-output database open. That happens *after* a successful kickoff, so
+    letting it propagate would silently demote a good plan to the deterministic
+    fallback. A cleanup failure is tolerated only once the kickoff has already
+    succeeded; anything that fails during kickoff still raises and falls back.
+    """
 
     from crewai.events.event_bus import crewai_event_bus
 
     from datachef.workflow.crewai_flow import isolated_crewai_runtime
 
     draft = PlanDraft(context=context)
-    with isolated_crewai_runtime():
-        try:
-            crew = build_planning_crew(context, draft, llm)
-            output = crew.kickoff()
-            if isinstance(output, object) and hasattr(output, "pydantic"):
+    kickoff_succeeded = False
+    cleanup_deferred = False
+    try:
+        with isolated_crewai_runtime():
+            try:
+                crew = build_planning_crew(context, draft, llm, timeout_seconds)
+                output = crew.kickoff()
                 envelope = getattr(output, "pydantic", None)
                 if isinstance(envelope, PlanEnvelope):
                     draft.summary = envelope.summary
-        finally:
-            crewai_event_bus.shutdown(wait=True)
-    return CrewPlanResult(plan=draft.build_plan(), draft=draft)
+                kickoff_succeeded = True
+            finally:
+                crewai_event_bus.shutdown(wait=True)
+    except Exception:
+        if not kickoff_succeeded:
+            raise
+        cleanup_deferred = True
+    return CrewPlanResult(
+        plan=draft.build_plan(),
+        draft=draft,
+        cleanup_deferred=cleanup_deferred,
+    )
 
 
 __all__ = [

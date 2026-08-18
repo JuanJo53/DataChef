@@ -907,3 +907,135 @@ def test_ui_never_imports_a_provider_or_the_transformation_agent() -> None:
             ), path
 
     assert scanned >= 9
+
+
+def test_approval_screen_shows_row_loss_beside_the_users_threshold() -> None:
+    """Informed exact approval: the numbers must be on the approval screen."""
+
+    at = _app()
+    _upload_and_diagnose(at, DEMO_CSV, "orders.csv")
+    _submit_intent(at, key_columns=["order_id"], row_loss=10.0)
+    _prepare(at)
+
+    assert _controller(at).session.screen.value == "APPROVAL"
+    labels = {item.label: item.value for item in at.metric}
+    assert labels["Estimated cumulative row loss"] == "8.33%"
+    assert labels["Your acceptable row loss"] == "10.00%"
+    text = _all_text(at)
+    assert "Estimated row removal per operation" in text
+    assert "op-deduplicate-keys-order_id" in text
+    assert "1 row(s), 8.33%" in text
+    _assert_no_traceback(at)
+
+
+def test_the_sidebar_always_shows_which_planner_is_active() -> None:
+    at = _app()
+    at.run()
+
+    sidebar = " ".join(item.value for item in at.sidebar.markdown)
+    assert "**Planner:**" in sidebar
+    assert "deterministic" in sidebar
+    captions = " ".join(item.value for item in at.sidebar.caption)
+    assert "No provider is contacted." in captions
+    _assert_no_traceback(at)
+
+
+def test_the_approval_screen_names_the_planner_that_produced_the_plan() -> None:
+    at = _app()
+    _upload_and_diagnose(at, DEMO_CSV, "orders.csv")
+    _submit_intent(at, key_columns=["order_id"], row_loss=10.0)
+    _prepare(at)
+
+    captions = " ".join(item.value for item in at.caption)
+    assert "Planner:" in captions
+    assert "deterministic" in captions
+    _assert_no_traceback(at)
+
+
+def test_the_approval_screen_renders_the_agent_tool_sequence() -> None:
+    """With an agent-backed controller the trace panel shows the real sequence."""
+
+    from datachef.agents import AgentPlanner, AgentReviewer
+    from datachef.agents.plan_crew import CrewPlanResult
+    from datachef.agents.tools import (
+        DeduplicateByKeysArgs,
+        PlanDraft,
+        apply_operation_args,
+        estimate_current_plan,
+        finalize_plan,
+        inspect_profile,
+    )
+
+    def scripted(ctx):
+        draft = PlanDraft(context=ctx)
+        issue = next(
+            item.issue_id
+            for item in ctx.diagnostic_report.issues
+            if item.kind.value == "DUPLICATE_KEYS"
+        )
+        inspect_profile(draft)
+        apply_operation_args(
+            draft,
+            "propose_deduplicate_by_keys",
+            DeduplicateByKeysArgs(
+                keys=["order_id"],
+                diagnostic_issue_ids=[issue],
+                rationale="Deterministic duplicate evidence.",
+                expected_effect="Keep the first row per key.",
+            ),
+        )
+        estimate_current_plan(draft)
+        finalize_plan(draft, "Deduplicate orders by order_id.")
+        return CrewPlanResult(plan=draft.build_plan(), draft=draft)
+
+    class Registry(ui_state.AgentRegistry):
+        def planner_factory(self):
+            planner = AgentPlanner(environment={
+                "DATACHEF_OFFLINE": "false",
+                "GOOGLE_API_KEY": "k",
+                "GEMINI_MODEL": "gemini-3.1-flash-lite",
+            })
+            planner._runner = scripted
+            self.planner = planner
+            return planner
+
+    registry = Registry(live=True)
+    controller = DataChefController(
+        clock=lambda: NOW,
+        planner_factory=registry.planner_factory,
+        reviewer_factory=AgentReviewer,
+    )
+    at = _app(controller)
+    at.session_state[ui_state.AGENT_REGISTRY] = registry
+    _upload_and_diagnose(at, DEMO_CSV, "orders.csv")
+    _submit_intent(at, key_columns=["order_id"], row_loss=10.0)
+    _prepare(at)
+
+    text = _all_text(at)
+    assert "AI planner" in text
+    assert (
+        "Tool sequence: inspect_profile → propose_deduplicate_by_keys → "
+        "estimate_current_plan → finalize_plan"
+    ) in text
+    assert "critic replied 8.33% row loss, no findings" in text
+    assert "AGENT_PLAN_ACCEPTED" in text
+    for leak in ("AIza", "C:\\", "Traceback", "gemini-3.1-flash-lite"):
+        assert leak not in text
+    _assert_no_traceback(at)
+
+
+def test_env_loading_does_not_flip_the_offline_default(monkeypatch) -> None:
+    monkeypatch.delenv("DATACHEF_OFFLINE", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+
+    at = _app()
+    at.run()
+
+    from ui.state import live_mode_permitted
+
+    assert live_mode_permitted() is False
+    registry = at.session_state[ui_state.AGENT_REGISTRY]
+    assert registry.live is False
+    sidebar = " ".join(item.value for item in at.sidebar.markdown)
+    assert "deterministic" in sidebar
+    _assert_no_traceback(at)
