@@ -60,13 +60,17 @@ def _reached_position(session) -> int:
     return max(positions)
 
 
-def _render_stage_indicator(controller, session) -> None:
+def _render_stage_indicator(controller, session, state) -> None:
     current = _ORDER.get(session.screen, 0)
     reached = _reached_position(session)
+    focus = bool(state.get("datachef_dashboard_focus", False))
     st.sidebar.markdown("### Progress")
     for screen, label in _PROGRESS:
         position = _ORDER[screen]
-        if position == current:
+        # While the Dashboard view (step 7) is active it "borrows" the highlight
+        # from Results, so Results shows as a revisitable stage.
+        is_current = position == current and not (screen == ScreenId.RESULTS and focus)
+        if is_current:
             st.sidebar.markdown(f"**➡️ {label}**")
         elif position <= reached:
             # Revisiting an already-reached stage. Navigation authorizes nothing:
@@ -76,10 +80,25 @@ def _render_stage_indicator(controller, session) -> None:
                 key=f"{ui_state.STAGE_NAV_WIDGET}_{screen.value}",
                 use_container_width=True,
             ):
+                state["datachef_dashboard_focus"] = False
                 controller.navigate(screen)
                 st.rerun()
         else:
             st.sidebar.markdown(f"◻️ {label}")
+
+    # Step 7 · Dashboard — presentation only, NOT a workflow stage. Available once
+    # Results is reached; it focuses the Results screen on the charts.
+    if reached >= _ORDER[ScreenId.RESULTS]:
+        if focus and session.screen == ScreenId.RESULTS:
+            st.sidebar.markdown("**➡️ 7 · Dashboard**")
+        elif st.sidebar.button(
+            "📊 7 · Dashboard",
+            key="datachef_nav_dashboard",
+            use_container_width=True,
+        ):
+            state["datachef_dashboard_focus"] = True
+            controller.navigate(ScreenId.RESULTS)
+            st.rerun()
 
 
 def _render_sidebar(controller, state) -> None:
@@ -87,7 +106,7 @@ def _render_sidebar(controller, state) -> None:
     st.sidebar.title("DataChef")
     st.sidebar.caption("Offline, deterministic, human-approved data preparation.")
 
-    _render_stage_indicator(controller, session)
+    _render_stage_indicator(controller, session, state)
 
     st.sidebar.markdown("---")
     registry = ui_state.agent_registry(state)

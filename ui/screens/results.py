@@ -75,8 +75,20 @@ def _render_dashboard(handoff: DashboardHandoff, preview_enabled: bool) -> None:
 
 
 def render(controller: Any, state: Any) -> None:
-    st.header("6 · Results")
     session = controller.session
+
+    # Step 7 · Dashboard (presentation only): focus the screen on the charts.
+    if bool(state.get("datachef_dashboard_focus", False)):
+        st.header("7 · Dashboard")
+        handoff = controller.build_dashboard_handoff()
+        if isinstance(handoff, DashboardHandoff):
+            _render_dashboard(handoff, session.preview_enabled)
+        else:
+            render_failure(handoff)
+        st.caption("Use “6 · Results” in the sidebar to return to the verified bundle.")
+        return
+
+    st.header("6 · Results")
 
     bundle = controller.build_artifacts()
     if isinstance(bundle, ArtifactSet):
