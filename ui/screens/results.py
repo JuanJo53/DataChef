@@ -24,6 +24,7 @@ _DOWNLOAD_LABELS = {
     "TRANSFORMATION_PLAN_JSON": "Download transformation plan",
     "QA_REPORT_JSON": "Download QA report",
     "EXECUTION_CHANGE_LOG_JSON": "Download execution change log",
+    "PIPELINE_SCRIPT_PY": "Download reusable pipeline script",
     "MANIFEST_JSON": "Download manifest",
 }
 
@@ -32,7 +33,7 @@ def _render_downloads(bundle: ArtifactSet) -> None:
     st.markdown("### Download the verified bundle")
     st.caption(
         "Every file is served exactly as the application produced it. The "
-        "manifest records a SHA-256 for each of the other five artifacts."
+        "manifest records a SHA-256 for each of the other six artifacts."
     )
     for artifact in bundle.artifacts():
         kind = artifact.kind.value

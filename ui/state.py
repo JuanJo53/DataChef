@@ -106,6 +106,12 @@ class AgentRegistry:
     def trace(self):
         return getattr(self.planner, "trace", None)
 
+    @property
+    def unsupported_requests(self) -> tuple[str, ...]:
+        """Scope the planning crew reported it had no tool for. Display only."""
+
+        return tuple(getattr(self.planner, "unsupported_requests", ()) or ())
+
 
 def build_controller(
     environment: Mapping[str, str] | None = None,

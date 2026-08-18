@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 
 import pytest
@@ -88,7 +89,6 @@ def _submit_intent(
     *,
     key_columns: list[str] | None = None,
     cast_columns: list[str] | None = None,
-    dedup_keys: list[str] | None = None,
     row_loss: float = 50.0,
     goal: str | None = None,
 ) -> AppTest:
@@ -98,8 +98,6 @@ def _submit_intent(
         _widget(at, "multiselect", ui_state.KEY_COLUMNS_WIDGET).set_value(key_columns)
     if cast_columns:
         _widget(at, "multiselect", ui_state.CAST_REQUEST_WIDGET).set_value(cast_columns)
-    if dedup_keys:
-        _widget(at, "multiselect", ui_state.DEDUP_REQUEST_WIDGET).set_value(dedup_keys)
     _widget(at, "slider", ui_state.ROW_LOSS_WIDGET).set_value(row_loss)
     _widget(at, "button", ui_state.SUBMIT_INTENT_WIDGET).click()
     at.run()
@@ -153,6 +151,7 @@ def test_happy_path_reaches_pass_with_full_bundle_and_dashboard() -> None:
         "datachef_w_download_TRANSFORMATION_PLAN_JSON",
         "datachef_w_download_QA_REPORT_JSON",
         "datachef_w_download_EXECUTION_CHANGE_LOG_JSON",
+        "datachef_w_download_PIPELINE_SCRIPT_PY",
         "datachef_w_download_MANIFEST_JSON",
     ]
     assert "DataChef Dashboard" in [header.value for header in at.header]
@@ -174,7 +173,7 @@ def test_page_refresh_after_pass_performs_no_further_work() -> None:
     after = _controller(at).session
     assert after.revision == before.revision
     assert after.command_history == before.command_history
-    assert len(at.download_button) == 6
+    assert len(at.download_button) == 7
     _assert_no_traceback(at)
 
 
@@ -312,7 +311,7 @@ def test_empty_plan_reaching_pass_still_offers_the_full_bundle() -> None:
 
     session = _controller(at).session
     assert session.workflow_runtime.state.stage is WorkflowStage.QA_PASSED
-    assert len(at.download_button) == 6
+    assert len(at.download_button) == 7
     _assert_no_traceback(at)
 
 
@@ -339,7 +338,7 @@ def test_full_reset_clears_state_and_rotates_the_uploader_key() -> None:
     assert _has(at, "file_uploader", ui_state.uploader_key(generation))
     _pass_run(at)
     assert _controller(at).session.uploader_generation == generation
-    assert len(at.download_button) == 6
+    assert len(at.download_button) == 7
 
     _widget(at, "button", ui_state.RESET_WIDGET).click()
     at.run()
@@ -374,7 +373,7 @@ def test_preview_is_off_by_default_and_toggling_keeps_command_history() -> None:
     assert after.preview_enabled is True
     assert after.command_history == before.command_history
     assert after.workflow_runtime.state.stage is before.workflow_runtime.state.stage
-    assert len(at.download_button) == 6
+    assert len(at.download_button) == 7
     _assert_no_traceback(at)
 
 
@@ -765,12 +764,13 @@ def test_dashboard_questions_sit_in_their_own_section_below_the_cleaning_fields(
     required_at = multiselects.index("Columns that must survive")
     key_at = multiselects.index("Which column tells you two rows are the same record?")
     cast_at = multiselects.index("Cast these columns to numeric")
-    dedup_at = multiselects.index("Deduplicate rows by these keys")
     suggested_at = multiselects.index(
         "Deterministic suggested questions to carry into the dashboard"
     )
-    # Cleaning fields keep their order; both question inputs come last.
-    assert required_at < key_at < cast_at < dedup_at < suggested_at
+    # Cleaning fields keep their order; both question inputs come last. The
+    # typed dedup request is gone: the key-column question above asks for it.
+    assert "Deduplicate rows by these keys" not in multiselects
+    assert required_at < key_at < cast_at < suggested_at
     text_areas = [str(item.label) for item in at.text_area]
     assert text_areas[-1] == "Your analytical questions (one per line)"
     _assert_no_traceback(at)
@@ -817,7 +817,7 @@ def test_empty_plan_names_the_findings_it_cannot_act_on_and_still_passes() -> No
     final = _controller(at).session
     assert final.workflow_runtime.state.stage is WorkflowStage.QA_PASSED
     assert final.workflow_runtime.state.qa_report.status is QAStatus.PASS
-    assert len(at.download_button) == 6
+    assert len(at.download_button) == 7
     _assert_no_traceback(at)
 
 
@@ -858,7 +858,7 @@ def test_stage_indicator_navigates_back_without_losing_workflow_state() -> None:
     returned = _controller(at).session
     assert returned.screen.value == "RESULTS"
     assert returned.command_history == before.command_history
-    assert len(at.download_button) == 6
+    assert len(at.download_button) == 7
 
 
 def test_navigating_forward_cannot_skip_approval_or_execution() -> None:
@@ -1024,18 +1024,331 @@ def test_the_approval_screen_renders_the_agent_tool_sequence() -> None:
     _assert_no_traceback(at)
 
 
-def test_env_loading_does_not_flip_the_offline_default(monkeypatch) -> None:
-    monkeypatch.delenv("DATACHEF_OFFLINE", raising=False)
+# A .env that tries as hard as it can to turn live mode on: live mode needs
+# offline off, a credential, and a model name, so a hostile file supplies all
+# three. This is the shape of a real developer .env, which is what made the
+# original version of this test depend on an untracked local file.
+_HOSTILE_DOTENV = "\n".join(
+    (
+        "DATACHEF_OFFLINE=false",
+        "GOOGLE_API_KEY=not-a-real-key",
+        "GEMINI_MODEL=gemini-3.1-flash-lite",
+        "",
+    )
+)
+_OFFLINE_DOTENV = "DATACHEF_OFFLINE=true\n"
+_LIVE_MODE_VARIABLES = ("DATACHEF_OFFLINE", "GOOGLE_API_KEY", "GEMINI_MODEL")
+
+
+@pytest.fixture
+def local_dotenv(monkeypatch, tmp_path):
+    """Point the shell's .env load at a file this test owns.
+
+    The shell resolves .env from its own PROJECT_ROOT, and AppTest executes
+    ``ui/app.py`` in a fresh namespace, so patching the imported module's
+    PROJECT_ROOT would not reach it. Redirecting ``dotenv.load_dotenv`` does,
+    and it forwards to the real loader with the caller's keywords intact, so
+    ``override=False`` semantics and real file parsing are still what is under
+    test -- only the path changes.
+
+    Returns a callable that installs a given .env body, or no file at all.
+    """
+
+    import dotenv
+
+    real_load_dotenv = dotenv.load_dotenv
+    env_path = tmp_path / ".env"
+    # load_dotenv writes into os.environ, and it may define variables this test
+    # never registered with monkeypatch, so the whole mapping is restored.
+    saved_environment = dict(os.environ)
+
+    def install(body: str | None) -> None:
+        if body is not None:
+            env_path.write_text(body, encoding="utf-8")
+
+        def load_from_this_file(dotenv_path=None, *args, **kwargs):
+            del dotenv_path, args
+            return real_load_dotenv(str(env_path), **kwargs)
+
+        monkeypatch.setattr(dotenv, "load_dotenv", load_from_this_file)
+
+    yield install
+
+    os.environ.clear()
+    os.environ.update(saved_environment)
+
+
+@pytest.mark.parametrize(
+    ("name", "dotenv_body"),
+    (
+        ("says true", _OFFLINE_DOTENV),
+        ("says false and supplies a credential", _HOSTILE_DOTENV),
+        ("is absent", None),
+    ),
+)
+def test_env_loading_does_not_flip_the_offline_default(
+    monkeypatch,
+    local_dotenv,
+    name: str,
+    dotenv_body: str | None,
+) -> None:
+    """.env cannot override an explicit offline default, whatever it contains.
+
+    The shell loads .env with ``override=False`` so a real environment variable
+    stays authoritative. The result below is identical in all three conditions,
+    which is what makes it independent of any developer's untracked .env.
+    """
+
+    del name
+    monkeypatch.setenv("DATACHEF_OFFLINE", "true")
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+    local_dotenv(dotenv_body)
 
     at = _app()
     at.run()
 
-    from ui.state import live_mode_permitted
-
-    assert live_mode_permitted() is False
+    assert ui_state.live_mode_permitted() is False
     registry = at.session_state[ui_state.AGENT_REGISTRY]
     assert registry.live is False
     sidebar = " ".join(item.value for item in at.sidebar.markdown)
     assert "deterministic" in sidebar
+    _assert_no_traceback(at)
+
+
+@pytest.mark.parametrize("dotenv_body", (None, "", _OFFLINE_DOTENV))
+def test_the_offline_default_holds_when_nothing_configures_live_mode(
+    monkeypatch,
+    local_dotenv,
+    dotenv_body: str | None,
+) -> None:
+    """With nothing set and nothing in .env, the default is offline."""
+
+    for variable in _LIVE_MODE_VARIABLES:
+        monkeypatch.delenv(variable, raising=False)
+    local_dotenv(dotenv_body)
+
+    at = _app()
+    at.run()
+
+    assert ui_state.live_mode_permitted() is False
+    assert at.session_state[ui_state.AGENT_REGISTRY].live is False
+    _assert_no_traceback(at)
+
+
+def test_a_local_dotenv_is_what_activates_live_mode(
+    monkeypatch,
+    local_dotenv,
+) -> None:
+    """The counterpart that gives the guard above its meaning.
+
+    Loading .env exists so a credential can reach os.environ at all; without
+    this the shell could never run the crew. So .env *may* turn live mode on
+    when nothing else has spoken -- it may not overrule something that has.
+    Asserting both halves keeps a future change from closing the coupling by
+    breaking the demo path instead.
+    """
+
+    for variable in _LIVE_MODE_VARIABLES:
+        monkeypatch.delenv(variable, raising=False)
+    local_dotenv(_HOSTILE_DOTENV)
+
+    at = _app()
+    at.run()
+
+    assert ui_state.live_mode_permitted() is True
+    assert at.session_state[ui_state.AGENT_REGISTRY].live is True
+    sidebar = " ".join(item.value for item in at.sidebar.markdown)
+    assert "AI planner" in sidebar
+    # Live mode is permitted, but no crew ran and no credential is displayed.
+    for leak in ("not-a-real-key", "AIza"):
+        assert leak not in " ".join(item.value for item in at.sidebar.markdown)
+    _assert_no_traceback(at)
+
+
+class _StubRegistry:
+    """Stands in for the AgentRegistry so the shell can be driven offline.
+
+    The live crew never runs in these tests; only the presentation path that
+    reads what the crew reported is under test here.
+    """
+
+    def __init__(self, unsupported_requests: tuple[str, ...]) -> None:
+        self.unsupported_requests = unsupported_requests
+        self.planner = None
+        self.reviewer = None
+        self.live = False
+        self.trace = None
+
+
+def _at_approval(at: AppTest | None = None) -> AppTest:
+    at = at or _app()
+    _upload_and_diagnose(at)
+    _submit_intent(at, key_columns=["order_id"])
+    _prepare(at)
+    return at
+
+
+def _markdown_text(at: AppTest) -> str:
+    return " ".join(element.value for element in at.markdown)
+
+
+def test_results_screen_offers_the_pipeline_script_download() -> None:
+    at = _pass_run()
+
+    button = _widget(at, "download_button", "datachef_w_download_PIPELINE_SCRIPT_PY")
+
+    assert button.label == "Download reusable pipeline script"
+    assert len(at.download_button) == 7
+    captions = " ".join(element.value for element in at.caption)
+    assert "text/x-python" in captions
+    assert "_pipeline.py" in captions
+    _assert_no_traceback(at)
+
+
+def test_approval_screen_states_what_the_agent_could_not_do() -> None:
+    at = _at_approval()
+    at.session_state[ui_state.AGENT_REGISTRY] = _StubRegistry(
+        ("mean imputation for the amount column",)
+    )
+
+    at.run()
+
+    text = _markdown_text(at)
+    assert "Not in this plan" in text
+    assert (
+        "The objective also asked for mean imputation for the amount column. "
+        "The offline allow-list has no executable operation for it, so it is "
+        "not in this plan." in text
+    )
+    # A neutral statement of scope, not a warning.
+    assert not any(
+        "mean imputation" in element.value for element in at.warning
+    )
+    assert not any("mean imputation" in element.value for element in at.error)
+    _assert_no_traceback(at)
+
+
+def test_unsupported_request_statement_never_renders_agent_markup() -> None:
+    at = _at_approval()
+    at.session_state[ui_state.AGENT_REGISTRY] = _StubRegistry(
+        ("<b>drop</b> the **imgUrl** [column](http://example.com)",)
+    )
+
+    at.run()
+
+    text = _markdown_text(at)
+    # Escaped, so the characters render as themselves rather than as markup.
+    assert r"\<b\>drop\</b\>" in text
+    assert r"\*\*imgUrl\*\*" in text
+    _assert_no_traceback(at)
+
+
+def test_no_screen_ever_enables_unsafe_html() -> None:
+    """An AST check: prose about the flag must not read as the flag itself.
+
+    Scoped to the product shell screens, which are the surfaces that render
+    plan evidence and agent-supplied text. ``ui/ingestion_view.py`` belongs to
+    the separate ingestion-agent view and does pass the flag today; that is a
+    pre-existing condition outside this slice, not something this test blesses.
+    """
+
+    offenders: list[str] = []
+    for path in (REPO_ROOT / "ui" / "screens").rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            for keyword in node.keywords:
+                if keyword.arg == "unsafe_allow_html":
+                    offenders.append(path.relative_to(REPO_ROOT).as_posix())
+
+    assert offenders == []
+
+
+def test_an_empty_unsupported_request_list_states_nothing() -> None:
+    at = _at_approval()
+    at.session_state[ui_state.AGENT_REGISTRY] = _StubRegistry(())
+
+    at.run()
+
+    assert "Not in this plan" not in _markdown_text(at)
+    _assert_no_traceback(at)
+
+
+def test_unsupported_requests_do_not_change_the_plan_or_the_approval_gate() -> None:
+    baseline = _at_approval()
+    baseline_plan = _controller(baseline).session.workflow_runtime.state
+    assert baseline_plan.transformation_plan is not None
+
+    at = _at_approval()
+    at.session_state[ui_state.AGENT_REGISTRY] = _StubRegistry(("a column drop",))
+    at.run()
+    _approve_and_execute(at)
+
+    session = _controller(at).session
+    # Same plan, still approvable, still reaching PASS with the full bundle.
+    assert (
+        session.workflow_runtime.state.transformation_plan.plan_id
+        == baseline_plan.transformation_plan.plan_id
+    )
+    assert session.workflow_runtime.state.stage is WorkflowStage.QA_PASSED
+    assert len(at.download_button) == 7
+    _assert_no_traceback(at)
+
+
+def test_the_intent_screen_no_longer_offers_a_separate_dedup_request() -> None:
+    at = _app()
+    _upload_and_diagnose(at)
+
+    # The key-column question remains; the request that restated it is gone.
+    assert _has(at, "multiselect", ui_state.KEY_COLUMNS_WIDGET)
+    assert _has(at, "multiselect", ui_state.CAST_REQUEST_WIDGET)
+    assert not _has(at, "multiselect", ui_state.DEDUP_REQUEST_WIDGET)
+    labels = [element.label for element in at.multiselect]
+    assert "Deduplicate rows by these keys" not in labels
+    assert "Which column tells you two rows are the same record?" in labels
+    _assert_no_traceback(at)
+
+
+def test_cast_requests_still_reconcile_after_the_dedup_field_is_gone() -> None:
+    at = _app()
+    _upload_and_diagnose(at, content=CAST_FAILURE_JSON, filename="orders.json", mime="application/json")
+    _submit_intent(at, key_columns=["order_id"], cast_columns=["amount_text"])
+
+    session = _controller(at).session
+    requests = session.requested_transformations
+    assert [item.request_id for item in requests] == ["request-cast-amount_text"]
+    assert all(
+        item.operation_type.value == "CAST_COLUMN" for item in requests
+    )
+    _prepare(at)
+    plan = _controller(at).session.workflow_runtime.state.transformation_plan
+    # The planner still accounts for the typed cast request.
+    assert any(
+        operation.operation_type.value == "CAST_COLUMN"
+        for operation in plan.operations
+    )
+    _assert_no_traceback(at)
+
+
+def test_reset_still_clears_cleanly_without_the_dedup_widget() -> None:
+    at = _app()
+    _upload_and_diagnose(at)
+    _widget(at, "multiselect", ui_state.CAST_REQUEST_WIDGET).set_value(["amount"])
+    at.run()
+    assert at.session_state[ui_state.CAST_REQUEST_WIDGET] == ["amount"]
+
+    _widget(at, "button", ui_state.RESET_WIDGET).click()
+    at.run()
+
+    # Reset lands back on Upload, so the intent widgets are not instantiated
+    # and their cleared keys are simply gone from session state.
+    live_keys = set(at.session_state.filtered_state)
+    assert ui_state.CAST_REQUEST_WIDGET not in live_keys
+    assert ui_state.DEDUP_REQUEST_WIDGET not in live_keys
+    assert _controller(at).session.source is None
+    assert _controller(at).session.requested_transformations == ()
     _assert_no_traceback(at)

@@ -22,6 +22,10 @@ from datachef.application.models import (
     SourceMetadata,
     StrictApplicationModel,
 )
+from datachef.application.pipeline_render import (
+    PIPELINE_MEDIA_TYPE,
+    render_pipeline_bytes,
+)
 from datachef.contracts import (
     HumanDecision,
     QAStatus,
@@ -32,7 +36,10 @@ from datachef.workflow import WorkflowRuntime
 from pydantic import Field
 
 
-ARTIFACT_SCHEMA_VERSION = 1
+# Version 2 adds the rendered pipeline script to the manifest's artifact list.
+# That list is its own schema: a consumer written against version 1 expects five
+# described artifacts and would silently mis-read six, so the bump is the signal.
+ARTIFACT_SCHEMA_VERSION = 2
 
 CSV_MEDIA_TYPE = "text/csv"
 PARQUET_MEDIA_TYPE = "application/vnd.apache.parquet"
@@ -45,6 +52,7 @@ class ArtifactKind(StrEnum):
     TRANSFORMATION_PLAN_JSON = "TRANSFORMATION_PLAN_JSON"
     QA_REPORT_JSON = "QA_REPORT_JSON"
     EXECUTION_CHANGE_LOG_JSON = "EXECUTION_CHANGE_LOG_JSON"
+    PIPELINE_SCRIPT_PY = "PIPELINE_SCRIPT_PY"
     MANIFEST_JSON = "MANIFEST_JSON"
 
 
@@ -136,6 +144,7 @@ class ArtifactSet:
     transformation_plan_json: DownloadArtifact
     qa_report_json: DownloadArtifact
     execution_change_log_json: DownloadArtifact
+    pipeline_script: DownloadArtifact
     manifest: DownloadArtifact
 
     def downloads(self) -> tuple[DownloadArtifact, ...]:
@@ -147,6 +156,7 @@ class ArtifactSet:
             self.transformation_plan_json,
             self.qa_report_json,
             self.execution_change_log_json,
+            self.pipeline_script,
         )
 
     def artifacts(self) -> tuple[DownloadArtifact, ...]:
@@ -374,6 +384,9 @@ def build_artifact_set(
         plan_content = canonical_json(plan.model_dump(mode="json"))
         qa_content = canonical_json(report.model_dump(mode="json"))
         change_log_content = canonical_json(result.model_dump(mode="json"))
+        # Rendered inside the same guard as every other serializer: a render
+        # failure refuses the whole bundle rather than shipping six of seven.
+        pipeline_content = render_pipeline_bytes(plan)
     except Exception:
         return _failure(ArtifactFailureCode.SERIALIZATION_FAILURE)
 
@@ -413,6 +426,12 @@ def build_artifact_set(
             JSON_MEDIA_TYPE,
             change_log_content,
         ),
+        _artifact(
+            ArtifactKind.PIPELINE_SCRIPT_PY,
+            "pipeline.py",
+            PIPELINE_MEDIA_TYPE,
+            pipeline_content,
+        ),
     )
     try:
         manifest_content = canonical_json(
@@ -432,6 +451,7 @@ def build_artifact_set(
         transformation_plan_json=downloads[2],
         qa_report_json=downloads[3],
         execution_change_log_json=downloads[4],
+        pipeline_script=downloads[5],
         manifest=manifest,
     )
 

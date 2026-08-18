@@ -35,6 +35,7 @@ from datachef.contracts import (
     TrimWhitespaceParameters,
 )
 from datachef.planning import validate_plan
+from datachef.privacy import sanitize_user_text
 from datachef.planning.plan import create_transformation_plan
 
 # Reason codes reuse the committed validation vocabulary; no new codes are added.
@@ -43,6 +44,10 @@ MISSING_COLUMN = "MISSING_COLUMN"
 UNKNOWN_ISSUE = "UNKNOWN_DIAGNOSTIC_ISSUE"
 EMPTY_TARGETS = "EMPTY_TARGET_COLUMNS"
 INVALID_KEY = "INVALID_KEY"
+
+# An unsupported-request note is the one place agent prose reaches a human, so
+# it is bounded at the tool boundary rather than trusted and truncated later.
+UNSUPPORTED_REQUEST_MAX_LENGTH = 240
 
 
 @dataclass
@@ -53,6 +58,10 @@ class PlanDraft:
     operations: list[TransformationOperation] = field(default_factory=list)
     invocations: list[ToolInvocation] = field(default_factory=list)
     summary: str = "Agent-proposed transformation plan."
+    # Objectives the agent could not act on. Deliberately parallel to
+    # ``operations`` and never read by ``build_plan``: this list is a statement
+    # of scope for the human, not an input to the plan or its validation.
+    unsupported_requests: list[str] = field(default_factory=list)
 
     @property
     def known_columns(self) -> frozenset[str]:
@@ -129,6 +138,10 @@ class DropDuplicateRowsArgs(_OperationArgs):
 class DeduplicateByKeysArgs(_OperationArgs):
     keys: list[str] = Field(min_length=1)
     keep: KeepPolicy = KeepPolicy.FIRST
+
+
+class ReportUnsupportedRequestArgs(_ToolArgs):
+    description: str = Field(min_length=1, max_length=UNSUPPORTED_REQUEST_MAX_LENGTH)
 
 
 class FinalizePlanArgs(_ToolArgs):
@@ -329,6 +342,37 @@ def discard_last_operation(draft: PlanDraft) -> dict[str, Any]:
     return {"accepted": True, "discarded_operation_id": removed.operation_id}
 
 
+def report_unsupported_request(draft: PlanDraft, description: str) -> dict[str, Any]:
+    """Record an objective no tool can satisfy. Touches nothing that executes.
+
+    The plan, the validation and the gate are all unaffected: this appends to a
+    list the Approval screen reads so a bounded agent reads as bounded rather
+    than as one that silently ignored half the objective. The prose is sanitized
+    here, at the boundary, and the trace records only that the call happened -
+    ``AttemptTrace`` carries codes, never model prose.
+    """
+
+    sanitized = sanitize_user_text(description)[:UNSUPPORTED_REQUEST_MAX_LENGTH].strip()
+    if not sanitized:
+        draft.record(
+            ToolInvocation(
+                tool_name="report_unsupported_request",
+                accepted=False,
+                reason_code=EMPTY_TARGETS,
+            )
+        )
+        return {"accepted": False, "reason_code": EMPTY_TARGETS}
+    if sanitized not in draft.unsupported_requests:
+        draft.unsupported_requests.append(sanitized)
+    draft.record(
+        ToolInvocation(
+            tool_name="report_unsupported_request",
+            accepted=True,
+        )
+    )
+    return {"accepted": True, "recorded_count": len(draft.unsupported_requests)}
+
+
 def finalize_plan(draft: PlanDraft, summary: str) -> dict[str, Any]:
     """Return a handle to the validated draft, or a typed refusal."""
 
@@ -456,11 +500,13 @@ __all__ = [
     "INVALID_KEY",
     "MISSING_COLUMN",
     "NoArgs",
+    "ReportUnsupportedRequestArgs",
     "NormalizeMissingTokensArgs",
     "PlanDraft",
     "RenameColumnArgs",
     "TrimWhitespaceArgs",
     "UNKNOWN_ISSUE",
+    "UNSUPPORTED_REQUEST_MAX_LENGTH",
     "apply_operation_args",
     "build_operation_specs",
     "discard_last_operation",
@@ -470,4 +516,5 @@ __all__ = [
     "guard_dedup_keys",
     "inspect_profile",
     "propose",
+    "report_unsupported_request",
 ]

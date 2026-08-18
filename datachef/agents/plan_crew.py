@@ -17,12 +17,14 @@ from datachef.agents.tools import (
     FinalizePlanArgs,
     NoArgs,
     PlanDraft,
+    ReportUnsupportedRequestArgs,
     apply_operation_args,
     build_operation_specs,
     discard_last_operation,
     estimate_current_plan,
     finalize_plan,
     inspect_profile,
+    report_unsupported_request,
 )
 from datachef.contracts import PlanningContext, TransformationPlan
 from datachef.planning import validate_plan
@@ -115,6 +117,23 @@ def build_crew_tools(draft: PlanDraft) -> list[Any]:
             del kwargs
             return discard_last_operation(draft)
 
+    class ReportUnsupportedTool(BaseTool):
+        model_config = ConfigDict(arbitrary_types_allowed=True)
+        name: str = "report_unsupported_request"
+        description: str = (
+            "Record one thing the objective asked for that no tool here can do, "
+            "in a single short sentence naming the operation the user wanted. "
+            "This does not change the plan; it tells the human what is out of "
+            "scope instead of leaving the request silently unanswered."
+        )
+        args_schema: type[BaseModel] = ReportUnsupportedRequestArgs
+
+        def _run(self, **kwargs: Any) -> dict[str, Any]:
+            return report_unsupported_request(
+                draft,
+                ReportUnsupportedRequestArgs(**kwargs).description,
+            )
+
     class FinalizeTool(BaseTool):
         model_config = ConfigDict(arbitrary_types_allowed=True)
         name: str = "finalize_plan"
@@ -127,7 +146,15 @@ def build_crew_tools(draft: PlanDraft) -> list[Any]:
         def _run(self, **kwargs: Any) -> dict[str, Any]:
             return finalize_plan(draft, FinalizePlanArgs(**kwargs).summary)
 
-    tools.extend([InspectProfileTool(), EstimateTool(), DiscardTool(), FinalizeTool()])
+    tools.extend(
+        [
+            InspectProfileTool(),
+            EstimateTool(),
+            DiscardTool(),
+            ReportUnsupportedTool(),
+            FinalizeTool(),
+        ]
+    )
     return tools
 
 
@@ -178,6 +205,10 @@ def build_planning_crew(
             "Call inspect_profile first. Propose operations only for reported "
             "issues. Call estimate_current_plan before finishing; if it reports "
             "findings, retract the offending operation and try a smaller change. "
+            "If the objective asks for anything your tools cannot do - a "
+            "different operation, an imputation, a column drop - call "
+            "report_unsupported_request once for each such request instead of "
+            "ignoring it. "
             "Finish by calling finalize_plan with a one-line summary."
         ),
         expected_output="A one-line summary of the plan you finalized.",

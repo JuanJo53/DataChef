@@ -82,6 +82,8 @@ def _run_subprocess(body: str) -> subprocess.CompletedProcess:
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=300,
         env=_subprocess_env(),
     )
@@ -134,6 +136,7 @@ def test_the_crew_builds_with_a_fake_llm_and_never_touches_the_network() -> None
             "inspect_profile",
             "estimate_current_plan",
             "discard_last_operation",
+            "report_unsupported_request",
             "finalize_plan",
         ], names
         assert len(crew.tasks) == 1
@@ -305,6 +308,8 @@ def test_importing_the_agent_package_never_loads_crewai() -> None:
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=180,
     )
 
@@ -326,6 +331,8 @@ def test_the_application_import_path_still_never_loads_crewai() -> None:
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=180,
     )
 

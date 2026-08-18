@@ -38,6 +38,7 @@ from datachef.contracts import (
     UserIntent,
     WorkflowStage,
 )
+from datachef.application.pipeline_render import render_pipeline_bytes
 from datachef.diagnostics import identify_dataset
 from datachef.workflow import WorkflowRuntime
 
@@ -153,9 +154,10 @@ def test_pass_run_builds_the_complete_approved_bundle() -> None:
         ArtifactKind.TRANSFORMATION_PLAN_JSON,
         ArtifactKind.QA_REPORT_JSON,
         ArtifactKind.EXECUTION_CHANGE_LOG_JSON,
+        ArtifactKind.PIPELINE_SCRIPT_PY,
         ArtifactKind.MANIFEST_JSON,
     )
-    assert len(bundle.downloads()) == 5
+    assert len(bundle.downloads()) == 6
     assert bundle.manifest not in bundle.downloads()
     media_types = {item.kind: item.media_type for item in bundle.artifacts()}
     assert media_types[ArtifactKind.CLEANED_CSV] == "text/csv"
@@ -600,7 +602,10 @@ def test_foreign_source_metadata_is_refused(metadata: object) -> None:
     assert failure.code.value == "SOURCE_METADATA_MISMATCH"
 
 
-@pytest.mark.parametrize("target", ("_csv_bytes", "_parquet_bytes", "canonical_json"))
+@pytest.mark.parametrize(
+    "target",
+    ("_csv_bytes", "_parquet_bytes", "canonical_json", "render_pipeline_bytes"),
+)
 def test_serialization_failure_yields_no_partial_bundle(monkeypatch, target: str) -> None:
     def failing(*args, **kwargs):
         del args, kwargs
@@ -629,3 +634,62 @@ def test_bytes_that_do_not_read_back_as_gold_yield_no_bundle(monkeypatch) -> Non
 
     assert isinstance(failure, ArtifactFailure)
     assert failure.code.value == "ROUND_TRIP_MISMATCH"
+
+
+def test_pipeline_script_ships_as_the_seventh_artifact() -> None:
+    controller = _gold_controller()
+    state = controller.session.workflow_runtime.state
+
+    bundle = controller.build_artifacts()
+
+    assert isinstance(bundle, ArtifactSet)
+    assert len(bundle.artifacts()) == 7
+    assert len(bundle.downloads()) == 6
+    script = bundle.pipeline_script
+    assert script.kind is ArtifactKind.PIPELINE_SCRIPT_PY
+    assert script.media_type == "text/x-python"
+    assert script in bundle.downloads()
+    # Byte-identical to the renderer called directly on the approved plan.
+    assert script.content == render_pipeline_bytes(state.transformation_plan)
+    assert b"import datachef" not in script.content
+    assert script.content.decode("utf-8").startswith("#!/usr/bin/env python3")
+
+
+def test_pipeline_script_filename_follows_the_existing_scheme() -> None:
+    controller = _gold_controller()
+    state = controller.session.workflow_runtime.state
+
+    bundle = controller.build_artifacts()
+
+    assert isinstance(bundle, ArtifactSet)
+    dataset_short = artifacts_module._short_id(state.dataset_identity.dataset_id)
+    plan_short = artifacts_module._short_id(state.transformation_plan.plan_id)
+    expected = f"datachef_{dataset_short}_{plan_short}_pipeline.py"
+    assert bundle.pipeline_script.filename == expected
+
+
+def test_manifest_schema_version_is_two_and_describes_six_artifacts() -> None:
+    bundle = _bundle()
+
+    manifest = json.loads(bundle.manifest.content.decode("utf-8"))
+
+    # The artifacts list is its own schema: six described entries, not five.
+    assert manifest["artifact_schema_version"] == 2
+    assert ARTIFACT_SCHEMA_VERSION == 2
+    assert len(manifest["artifacts"]) == 6
+    described = {entry["kind"]: entry for entry in manifest["artifacts"]}
+    assert ArtifactKind.PIPELINE_SCRIPT_PY.value in described
+    assert ArtifactKind.MANIFEST_JSON.value not in described
+    entry = described[ArtifactKind.PIPELINE_SCRIPT_PY.value]
+    # Recomputed from the bytes actually returned in the ArtifactSet.
+    assert entry["sha256"] == sha256(bundle.pipeline_script.content).hexdigest()
+    assert entry["byte_size"] == len(bundle.pipeline_script.content)
+    assert entry["media_type"] == "text/x-python"
+    assert entry["filename"] == bundle.pipeline_script.filename
+
+
+def test_pipeline_script_bytes_are_identical_across_repeated_builds() -> None:
+    first = _bundle().pipeline_script.content
+    second = _bundle().pipeline_script.content
+
+    assert first == second

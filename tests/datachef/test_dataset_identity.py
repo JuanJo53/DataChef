@@ -97,6 +97,8 @@ def test_supported_fingerprint_is_stable_across_hash_seeds() -> None:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=15,
         )
         fingerprints.append(completed.stdout.strip())

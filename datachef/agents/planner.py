@@ -46,6 +46,10 @@ class AgentPlanner:
         default_factory=lambda: AgentTrace(mode=AgentMode.OFFLINE, model_configured=False)
     )
     environment: dict[str, str] | None = None
+    # Objectives the crew reported it had no tool for. Presentation only: the
+    # Approval screen states them as scope, and nothing here reaches the plan,
+    # the validation, or the approval gate.
+    unsupported_requests: tuple[str, ...] = ()
     _runner: object | None = None
 
     def propose(
@@ -126,6 +130,11 @@ class AgentPlanner:
             (AgentOutcome.AGENT_RUNTIME_CLEANUP_DEFERRED,)
             if getattr(result, "cleanup_deferred", False)
             else ()
+        )
+        # Kept even when the plan is later rejected: what the agent could not do
+        # is true regardless of whether its plan survived validation.
+        self.unsupported_requests = tuple(
+            getattr(result.draft, "unsupported_requests", ())
         )
         return result.plan, tuple(result.draft.invocations), notices
 

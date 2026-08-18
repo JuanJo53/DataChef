@@ -73,6 +73,43 @@ def _render_plan_summary(evidence: Any, report: Any) -> None:
         )
 
 
+# Agent prose is untrusted display text. Streamlit escapes HTML on its own (we
+# never pass unsafe_allow_html), and escaping the Markdown control characters too
+# means a reported request renders as the sentence it is, not as formatting.
+_MARKDOWN_CONTROL = frozenset("\\`*_{}[]()#+-.!|<>~")
+
+
+def _plain(text: str) -> str:
+    """Render agent-supplied text as literal characters, never as markup."""
+
+    return "".join(
+        "\\" + character if character in _MARKDOWN_CONTROL else character
+        for character in text
+    )
+
+
+def _render_unsupported_requests(state: Any) -> None:
+    """State what the objective asked for that the allow-list cannot express.
+
+    Neutral scope, not a warning: nothing here is wrong, and nothing here
+    changes the plan, the validation, or the approval gate.
+    """
+
+    registry = ui_state.agent_registry(state)
+    requests = tuple(getattr(registry, "unsupported_requests", ()) or ())
+    if not requests:
+        return
+    st.markdown("### Not in this plan")
+    for description in requests:
+        # The agent may or may not end its sentence; the statement reads the
+        # same either way rather than running two sentences together.
+        subject = _plain(description.rstrip().rstrip(".").strip())
+        st.markdown(
+            f"The objective also asked for {subject}. The offline allow-list "
+            "has no executable operation for it, so it is not in this plan."
+        )
+
+
 def _render_agent_trace(state: Any) -> None:
     """Show what the planning crew did. Presentation only; decides nothing."""
 
@@ -143,6 +180,7 @@ def render(controller: Any, state: Any) -> None:
         return
 
     _render_plan_summary(runtime.state, session.display_diagnostic_report)
+    _render_unsupported_requests(state)
     # Informed, exact approval: the human sees what this plan is estimated to
     # remove, beside the threshold they set, before they consent.
     render_validation(runtime.state, session.intent)

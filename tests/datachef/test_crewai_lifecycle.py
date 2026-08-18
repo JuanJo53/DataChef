@@ -28,6 +28,8 @@ def test_deterministic_service_import_does_not_import_crewai() -> None:
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=15,
     )
 

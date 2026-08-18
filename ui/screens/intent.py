@@ -88,19 +88,18 @@ def render(controller: Any, state: Any) -> None:
     )
     st.markdown("### Typed transformation requests")
     st.caption(
-        "This offline slice executes numeric casts and key deduplication. The "
-        "planner must account for every request you make here."
+        "This offline slice executes numeric casts. The planner must account "
+        "for every request you make here."
     )
     cast_columns = st.multiselect(
         "Cast these columns to numeric",
         columns,
         key=ui_state.CAST_REQUEST_WIDGET,
     )
-    dedup_keys = st.multiselect(
-        "Deduplicate rows by these keys",
-        columns,
-        key=ui_state.DEDUP_REQUEST_WIDGET,
-    )
+    # A separate "deduplicate by these keys" control asked the same question as
+    # "which column tells you two rows are the same record?" above, in different
+    # words. The key columns already drive deduplication, so the duplicate input
+    # is gone; the request contract and the submit handler are unchanged.
 
     # Questions drive the dashboard, not the cleaning plan, so they sit below
     # every cleaning field in their own section.
@@ -135,7 +134,7 @@ def render(controller: Any, state: Any) -> None:
                     line.strip() for line in (authored or "").splitlines() if line.strip()
                 ),
             )
-            requests = build_transformation_requests(cast_columns, dedup_keys)
+            requests = build_transformation_requests(cast_columns, [])
         except (ValueError, TypeError):
             st.error(
                 "**INVALID_INTENT_REQUEST** — the submitted intent or requests "
