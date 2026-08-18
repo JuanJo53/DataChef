@@ -6,6 +6,19 @@ import pandas as pd
 # ---------------------------------------------------------------------
 # Helpers de formato
 # ---------------------------------------------------------------------
+def _shades(hex_color: str, n: int) -> list:
+    """Genera n tonos (del color base hacia claro) para las rebanadas del pastel."""
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    out = []
+    n = max(int(n), 1)
+    for i in range(n):
+        t = 0.0 if n == 1 else (i / n) * 0.6  # hasta 60% hacia el blanco
+        rr, gg, bb = int(r + (255 - r) * t), int(g + (255 - g) * t), int(b + (255 - b) * t)
+        out.append(f"#{rr:02x}{gg:02x}{bb:02x}")
+    return out
+
+
 def _format_value(value, fmt: str) -> str:
     """Da formato humano a los valores de los KPIs."""
     try:
@@ -92,23 +105,43 @@ def render_charts(report_data: dict):
         if not numeric.empty:
             st.write(numeric.describe())
 
-    for chart in charts:
-        st.subheader(chart["title"])
+    # Controles de personalizacion (color + tipo de grafico). Solo afectan como
+    # se DIBUJA; nunca cambian el spec (el contrato con el pipeline se respeta).
+    color = "#22D3EE"
+    if charts:
+        with st.expander("🎨 Customize dashboard"):
+            color = st.color_picker("Chart color", value="#22D3EE", key="dash_color")
+            st.caption("Pick a color, and switch each chart's type with the dropdown next to its title.")
+
+    type_options = ["bar", "line", "area", "pie"]
+    for i, chart in enumerate(charts):
         if chart["type"] == "histogram":
-            fig = px.histogram(df, x=chart["x"])
-        else:
-            data = _aggregate(df, chart)
-            # La columna Y es "count" en graficos de conteo, o la medida real.
-            ycol = "count" if (chart.get("agg") == "count" or chart.get("y") is None) else chart["y"]
-            if chart["type"] == "line":
-                fig = px.line(data, x=chart["x"], y=ycol, markers=True)
-            elif chart["type"] == "bar":
-                fig = px.bar(data, x=chart["x"], y=ycol)
-            elif chart["type"] == "pie":
-                fig = px.pie(data, names=chart["x"], values=ycol)
-            else:
-                continue
-        st.plotly_chart(fig, use_container_width=True)
+            st.subheader(chart["title"])
+            fig = px.histogram(df, x=chart["x"], color_discrete_sequence=[color])
+            st.plotly_chart(fig, use_container_width=True, key=f"dash_chart_{i}")
+            continue
+
+        # Titulo + selector de tipo de grafico (por grafico).
+        head, ctrl = st.columns([4, 1])
+        head.subheader(chart["title"])
+        default_type = chart["type"] if chart["type"] in type_options else "bar"
+        ctype = ctrl.selectbox(
+            "Type", type_options, index=type_options.index(default_type),
+            key=f"dash_ctype_{i}", label_visibility="collapsed",
+        )
+
+        data = _aggregate(df, chart)
+        # La columna Y es "count" en graficos de conteo, o la medida real.
+        ycol = "count" if (chart.get("agg") == "count" or chart.get("y") is None) else chart["y"]
+        if ctype == "line":
+            fig = px.line(data, x=chart["x"], y=ycol, markers=True, color_discrete_sequence=[color])
+        elif ctype == "area":
+            fig = px.area(data, x=chart["x"], y=ycol, color_discrete_sequence=[color])
+        elif ctype == "pie":
+            fig = px.pie(data, names=chart["x"], values=ycol, color_discrete_sequence=_shades(color, len(data)))
+        else:  # bar
+            fig = px.bar(data, x=chart["x"], y=ycol, color_discrete_sequence=[color])
+        st.plotly_chart(fig, use_container_width=True, key=f"dash_chart_{i}")
 
     # 3) Insights en lenguaje natural.
     insights = spec.get("insights", [])
