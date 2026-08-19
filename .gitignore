@@ -24,6 +24,7 @@ ENV/
 .env.*
 !.env.example
 prompts/local/
+prompts/
 
 # Data outputs
 data/local/
