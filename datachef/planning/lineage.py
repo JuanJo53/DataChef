@@ -24,6 +24,19 @@ class ColumnLineage:
         self._original_to_current[original] = target
         return True
 
+    def drop(self, current: str) -> bool:
+        """Forget a column so later steps see it as absent.
+
+        The dropped original is removed outright rather than mapped to a
+        sentinel: MISSING_COLUMN must fire for any later operation naming it.
+        """
+
+        original = self.original_for_current(current)
+        if original is None:
+            return False
+        del self._original_to_current[original]
+        return True
+
     def original_for_current(self, current: str) -> str | None:
         return next(
             (

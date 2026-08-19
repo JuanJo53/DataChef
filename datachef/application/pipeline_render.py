@@ -37,6 +37,10 @@ import ast
 
 from datachef.contracts import (
     CastColumnParameters,
+    DropColumnParameters,
+    ImputeMissingParameters,
+    ImputeStrategy,
+    NormalizeNumericTextParameters,
     CastErrorPolicy,
     CastTarget,
     DeduplicateByKeysParameters,
@@ -300,6 +304,106 @@ def _deduplicate_by_keys_lines(
     ]
 
 
+
+# Mirrors datachef.transform.operations._CURRENCY_SYMBOLS and
+# _THOUSANDS_SEPARATORS. Emitted as ordered tuples, never set literals, so the
+# rendered text cannot reorder between processes.
+_CURRENCY_SYMBOLS_ORDERED = ("$", "€", "£", "¥", "₹", "₩", "₽")
+_THOUSANDS_SEPARATORS_ORDERED = (",", "_")
+
+
+def _drop_column_lines(operation: TransformationOperation, slug: str) -> list[str]:
+    del slug
+    assert isinstance(operation.parameters, DropColumnParameters)
+    # frame.drop raises on an absent column, exactly as the handler does.
+    return [
+        "frame = frame.drop(columns=" + _text_list(operation.target_columns) + ")"
+    ]
+
+
+def _normalize_numeric_text_lines(
+    operation: TransformationOperation,
+    slug: str,
+) -> list[str]:
+    parameters = operation.parameters
+    assert isinstance(parameters, NormalizeNumericTextParameters)
+    lines = [
+        "_currency_" + slug + " = set(" + _text_tuple(_CURRENCY_SYMBOLS_ORDERED) + ")",
+        "_thousands_" + slug + " = set("
+        + _text_tuple(_THOUSANDS_SEPARATORS_ORDERED)
+        + ")",
+        "",
+        "def _strip_" + slug + "(value):",
+        "    if not isinstance(value, str):",
+        "        return value",
+        "    text = value",
+    ]
+    if parameters.strip_currency_symbols:
+        lines.extend(
+            [
+                "    text = ''.join(",
+                "        character for character in text",
+                "        if character not in _currency_" + slug,
+                "    )",
+            ]
+        )
+    if parameters.strip_thousands_separators:
+        lines.extend(
+            [
+                "    text = ''.join(",
+                "        character for character in text",
+                "        if character not in _thousands_" + slug,
+                "    )",
+            ]
+        )
+    if parameters.strip_whitespace:
+        lines.append("    text = text.strip()")
+    lines.append("    return text")
+    lines.append("")
+    lines.append("for _column in " + _text_list(operation.target_columns) + ":")
+    lines.append("    frame[_column] = frame[_column].map(_strip_" + slug + ")")
+    return lines
+
+
+def _impute_missing_lines(
+    operation: TransformationOperation,
+    slug: str,
+) -> list[str]:
+    parameters = operation.parameters
+    assert isinstance(parameters, ImputeMissingParameters)
+    column = operation.target_columns[0]
+    before = "_before_" + slug
+    lines = [
+        before + " = frame[" + _text(column) + "].copy(deep=True)",
+        "if not bool(" + before + ".isna().any()):",
+        "    raise ValueError("
+        + _text("imputation requires at least one missing value")
+        + ")",
+    ]
+    if parameters.strategy is ImputeStrategy.CONSTANT:
+        # A literal from the plan, emitted through repr like any other datum.
+        lines.append("_fill_" + slug + " = " + repr(parameters.constant_value))
+    elif parameters.strategy is ImputeStrategy.MODE:
+        lines.extend(
+            [
+                "_modes_" + slug + " = " + before + ".mode(dropna=True)",
+                "if _modes_" + slug + ".empty:",
+                "    raise ValueError(" + _text("no mode exists for this column") + ")",
+                "_fill_" + slug + " = _modes_" + slug + ".iloc[0]",
+            ]
+        )
+    elif parameters.strategy is ImputeStrategy.MEAN:
+        lines.append("_fill_" + slug + " = " + before + ".mean()")
+    elif parameters.strategy is ImputeStrategy.MEDIAN:
+        lines.append("_fill_" + slug + " = " + before + ".median()")
+    else:  # pragma: no cover - the enum makes this unreachable
+        raise ValueError("unsupported imputation strategy")
+    lines.append(
+        "frame[" + _text(column) + "] = " + before + ".fillna(_fill_" + slug + ")"
+    )
+    return lines
+
+
 _OPERATION_RENDERERS = {
     OperationType.TRIM_WHITESPACE: _trim_whitespace_lines,
     OperationType.NORMALIZE_MISSING_TOKENS: _normalize_missing_tokens_lines,
@@ -307,6 +411,9 @@ _OPERATION_RENDERERS = {
     OperationType.RENAME_COLUMN: _rename_column_lines,
     OperationType.DROP_DUPLICATE_ROWS: _drop_duplicate_rows_lines,
     OperationType.DEDUPLICATE_BY_KEYS: _deduplicate_by_keys_lines,
+    OperationType.DROP_COLUMN: _drop_column_lines,
+    OperationType.IMPUTE_MISSING: _impute_missing_lines,
+    OperationType.NORMALIZE_NUMERIC_TEXT: _normalize_numeric_text_lines,
 }
 
 

@@ -38,6 +38,10 @@ from datachef.contracts import (
     RiskLevel,
     TransformationOperation,
     TrimWhitespaceParameters,
+    DropColumnParameters,
+    ImputeMissingParameters,
+    ImputeStrategy,
+    NormalizeNumericTextParameters,
 )
 from datachef.diagnostics import dataframe_fingerprint
 from datachef.planning.plan import create_transformation_plan
@@ -220,6 +224,26 @@ _DEDUPLICATE = _operation(
     ("order_id",),
     DeduplicateByKeysParameters(keys=("order_id",), keep=KeepPolicy.FIRST),
 )
+_DROP_COLUMN = _operation(
+    "op-001-drop_column",
+    OperationType.DROP_COLUMN,
+    ("note",),
+    DropColumnParameters(),
+)
+
+_IMPUTE_MISSING = _operation(
+    "op-001-impute_missing",
+    OperationType.IMPUTE_MISSING,
+    ("note",),
+    ImputeMissingParameters(strategy=ImputeStrategy.MODE),
+)
+
+_NORMALIZE_NUMERIC_TEXT = _operation(
+    "op-001-normalize_numeric_text",
+    OperationType.NORMALIZE_NUMERIC_TEXT,
+    ("measure_text",),
+    NormalizeNumericTextParameters(),
+)
 
 # One case per operation type, plus the cast variants, plus a multi-operation
 # plan that runs them in sequence the way an agent-proposed plan would.
@@ -233,6 +257,9 @@ EQUIVALENCE_CASES: tuple[tuple[str, tuple[TransformationOperation, ...]], ...] =
     ("RENAME_COLUMN", (_RENAME,)),
     ("DROP_DUPLICATE_ROWS", (_DROP_DUPLICATES,)),
     ("DEDUPLICATE_BY_KEYS", (_DEDUPLICATE,)),
+    ("DROP_COLUMN", (_DROP_COLUMN,)),
+    ("IMPUTE_MISSING", (_IMPUTE_MISSING,)),
+    ("NORMALIZE_NUMERIC_TEXT", (_NORMALIZE_NUMERIC_TEXT,)),
 )
 
 

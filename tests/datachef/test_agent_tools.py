@@ -69,7 +69,7 @@ def test_every_executable_operation_type_has_a_proposal_tool() -> None:
     specs = build_operation_specs()
 
     assert {operation_type for _, operation_type, _ in specs} == set(OperationType)
-    assert len(specs) == len(OPERATION_CATALOGUE) == 6
+    assert len(specs) == len(OPERATION_CATALOGUE) == 9
     assert all(definition.handler for definition in OPERATION_CATALOGUE.values())
 
 
@@ -605,5 +605,5 @@ def test_unsupported_requests_do_not_widen_the_executable_tool_surface() -> None
     specs = build_operation_specs()
 
     assert {operation_type for _, operation_type, _ in specs} == set(OperationType)
-    assert len(specs) == 6
+    assert len(specs) == 9
     assert "report_unsupported_request" not in {name for name, _, _ in specs}

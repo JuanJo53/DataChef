@@ -20,6 +20,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from datachef.agents.trace import ToolInvocation
 from datachef.contracts import (
     CastColumnParameters,
+    DropColumnParameters,
+    ImputeMissingParameters,
+    ImputeStrategy,
+    NormalizeNumericTextParameters,
     CastErrorPolicy,
     CastTarget,
     DeduplicateByKeysParameters,
@@ -142,6 +146,24 @@ class DeduplicateByKeysArgs(_OperationArgs):
 
 class ReportUnsupportedRequestArgs(_ToolArgs):
     description: str = Field(min_length=1, max_length=UNSUPPORTED_REQUEST_MAX_LENGTH)
+
+
+class DropColumnArgs(_OperationArgs):
+    target_columns: list[str] = Field(min_length=1)
+
+
+class ImputeMissingArgs(_OperationArgs):
+    target_columns: list[str] = Field(min_length=1, max_length=1)
+    strategy: ImputeStrategy
+    # Closed scalar union, matching the contract. No expression, no callable.
+    constant_value: str | int | float | bool | None = None
+
+
+class NormalizeNumericTextArgs(_OperationArgs):
+    target_columns: list[str] = Field(min_length=1)
+    strip_whitespace: bool = True
+    strip_currency_symbols: bool = True
+    strip_thousands_separators: bool = True
 
 
 class FinalizePlanArgs(_ToolArgs):
@@ -416,6 +438,13 @@ def build_operation_specs() -> tuple[tuple[str, OperationType, type[_OperationAr
             OperationType.DEDUPLICATE_BY_KEYS,
             DeduplicateByKeysArgs,
         ),
+        ("propose_drop_column", OperationType.DROP_COLUMN, DropColumnArgs),
+        ("propose_impute_missing", OperationType.IMPUTE_MISSING, ImputeMissingArgs),
+        (
+            "propose_normalize_numeric_text",
+            OperationType.NORMALIZE_NUMERIC_TEXT,
+            NormalizeNumericTextArgs,
+        ),
     )
 
 
@@ -487,6 +516,40 @@ def apply_operation_args(
             parameters=DeduplicateByKeysParameters(keys=keys, keep=args.keep),
             args=args,
         )
+    if isinstance(args, DropColumnArgs):
+        return propose(
+            draft,
+            tool_name=tool_name,
+            operation_type=OperationType.DROP_COLUMN,
+            target_columns=tuple(args.target_columns),
+            parameters=DropColumnParameters(),
+            args=args,
+        )
+    if isinstance(args, ImputeMissingArgs):
+        return propose(
+            draft,
+            tool_name=tool_name,
+            operation_type=OperationType.IMPUTE_MISSING,
+            target_columns=tuple(args.target_columns),
+            parameters=ImputeMissingParameters(
+                strategy=args.strategy,
+                constant_value=args.constant_value,
+            ),
+            args=args,
+        )
+    if isinstance(args, NormalizeNumericTextArgs):
+        return propose(
+            draft,
+            tool_name=tool_name,
+            operation_type=OperationType.NORMALIZE_NUMERIC_TEXT,
+            target_columns=tuple(args.target_columns),
+            parameters=NormalizeNumericTextParameters(
+                strip_whitespace=args.strip_whitespace,
+                strip_currency_symbols=args.strip_currency_symbols,
+                strip_thousands_separators=args.strip_thousands_separators,
+            ),
+            args=args,
+        )
     raise TypeError("unsupported tool arguments")
 
 
@@ -496,6 +559,9 @@ __all__ = [
     "DeduplicateByKeysArgs",
     "DropDuplicateRowsArgs",
     "EMPTY_TARGETS",
+    "DropColumnArgs",
+    "ImputeMissingArgs",
+    "NormalizeNumericTextArgs",
     "FinalizePlanArgs",
     "INVALID_KEY",
     "MISSING_COLUMN",

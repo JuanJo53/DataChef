@@ -6,6 +6,8 @@ from datachef.contracts import (
     CastColumnParameters,
     DeduplicateByKeysParameters,
     DiagnosticIssueKind,
+    ImputeMissingParameters,
+    ImputeStrategy,
     OperationType,
     PIIHandling,
     PlanValidationFinding,
@@ -19,6 +21,42 @@ from datachef.contracts import (
 from datachef.transform.operations import OPERATION_CATALOGUE
 from datachef.planning.plan import expected_plan_id
 from datachef.planning.lineage import ColumnLineage
+
+
+
+# Dtype families, read off the provider-safe column schema. Prefix tests rather
+# than an exhaustive list of pandas dtype spellings, so a widening dtype name
+# does not silently fall through to "not numeric".
+_NUMERIC_DTYPE_PREFIXES = ("int", "uint", "float", "number", "decimal")
+_TEXT_DTYPES = frozenset({"str", "string", "object"})
+
+
+def _is_numeric_dtype(dtype: str) -> bool:
+    return dtype.lower().startswith(_NUMERIC_DTYPE_PREFIXES)
+
+
+def _is_text_dtype(dtype: str) -> bool:
+    return dtype.lower() in _TEXT_DTYPES
+
+
+def _declared_dtypes(context: PlanningContext) -> dict[str, str]:
+    return {column.name: column.dtype for column in context.column_schema}
+
+
+def _null_counts(context: PlanningContext) -> dict[str, int]:
+    """Return measured per-column null counts from the privacy-safe context."""
+
+    return context.null_counts
+
+def _constant_matches_dtype(value: object, dtype: str) -> bool:
+    if _is_numeric_dtype(dtype):
+        # bool is an int subclass in Python; a Boolean is not a number here.
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if _is_text_dtype(dtype):
+        return isinstance(value, str)
+    if dtype.lower().startswith("bool"):
+        return isinstance(value, bool)
+    return False
 
 
 def validate_plan(
@@ -59,6 +97,8 @@ def validate_plan(
     )
     protected = set(context.user_intent.protected_columns)
     required = set(context.user_intent.required_columns)
+    declared_dtypes = _declared_dtypes(context)
+    null_counts = _null_counts(context)
     issue_ids = {issue.issue_id for issue in context.diagnostic_report.issues}
 
     for operation in plan.operations:
@@ -139,6 +179,89 @@ def validate_plan(
                     "Key deduplication is not allowed when any approved key is null.",
                     operation.operation_id,
                 )
+
+        elif operation.operation_type is OperationType.DROP_COLUMN:
+            if operation.target_columns:
+                dropped_required = sorted(required.intersection(operation.target_columns))
+                for column in dropped_required:
+                    add(
+                        "REQUIRED_COLUMN_DROP",
+                        f"Required column cannot be dropped: {column}.",
+                        operation.operation_id,
+                    )
+                surviving = [
+                    column
+                    for column in current_columns
+                    if column not in set(operation.target_columns)
+                ]
+                if not surviving:
+                    add(
+                        "DROP_ALL_COLUMNS",
+                        "A plan may not drop every column.",
+                        operation.operation_id,
+                    )
+                if not missing and not dropped_required and surviving:
+                    for column in operation.target_columns:
+                        lineage.drop(column)
+        elif operation.operation_type is OperationType.IMPUTE_MISSING:
+            parameters = operation.parameters
+            assert isinstance(parameters, ImputeMissingParameters)
+            if len(operation.target_columns) != 1:
+                add(
+                    "IMPUTE_TARGET_COUNT",
+                    "Imputation requires exactly one target column.",
+                    operation.operation_id,
+                )
+            elif not missing:
+                column = operation.target_columns[0]
+                original = lineage.original_for_current(column)
+                dtype = declared_dtypes.get(original or column, "")
+                nulls = null_counts.get(original or column, 0)
+                if not nulls:
+                    add(
+                        "IMPUTE_NO_MISSING_VALUES",
+                        "Column has no missing values, so there is nothing to impute.",
+                        operation.operation_id,
+                    )
+                if parameters.strategy in (ImputeStrategy.MEAN, ImputeStrategy.MEDIAN):
+                    if not _is_numeric_dtype(dtype):
+                        add(
+                            "IMPUTE_STRATEGY_DTYPE_MISMATCH",
+                            "Mean and median imputation require a numeric column.",
+                            operation.operation_id,
+                        )
+                elif parameters.strategy is ImputeStrategy.MODE:
+                    # A column that is entirely null has no most-frequent value.
+                    if nulls and nulls >= context.dataset_identity.row_count:
+                        add(
+                            "IMPUTE_NO_MODE",
+                            "Column is entirely null, so no mode exists.",
+                            operation.operation_id,
+                        )
+                elif parameters.strategy is ImputeStrategy.CONSTANT:
+                    if parameters.constant_value is None:
+                        add(
+                            "IMPUTE_CONSTANT_TYPE_MISMATCH",
+                            "Constant imputation requires a constant value.",
+                            operation.operation_id,
+                        )
+                    elif not _constant_matches_dtype(parameters.constant_value, dtype):
+                        add(
+                            "IMPUTE_CONSTANT_TYPE_MISMATCH",
+                            "Constant value type does not match the column dtype.",
+                            operation.operation_id,
+                        )
+        elif operation.operation_type is OperationType.NORMALIZE_NUMERIC_TEXT:
+            if not missing:
+                for column in operation.target_columns:
+                    original = lineage.original_for_current(column)
+                    dtype = declared_dtypes.get(original or column, "")
+                    if not _is_text_dtype(dtype):
+                        add(
+                            "NORMALIZE_NON_TEXT_COLUMN",
+                            f"Numeric-text normalization requires a text column: {column}.",
+                            operation.operation_id,
+                        )
 
         if definition.may_drop_rows and context.dataset_identity.row_count:
             estimated_rows = 0

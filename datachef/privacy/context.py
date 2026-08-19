@@ -140,6 +140,10 @@ def build_planning_context(
     """Create local row-free state; use the provider projection for any LLM call."""
 
     aliases = (column_alias_map or build_column_alias_map(report, intent)).as_dict()
+    null_counts = {
+        aliases[profile.name]: int(profile.null_count)
+        for profile in report.column_profiles
+    }
     safe_identity = DatasetIdentity(
         dataset_id=report.dataset_identity.dataset_id,
         fingerprint=report.dataset_identity.fingerprint,
@@ -231,6 +235,7 @@ def build_planning_context(
         ),
         dataset_identity=safe_identity,
         column_schema=safe_identity.column_schema,
+        null_counts=null_counts,
         diagnostic_report=safe_report,
         user_intent=safe_intent,
         questions=safe_questions,
@@ -249,6 +254,7 @@ def build_provider_planning_payload(
         row_count=context.dataset_identity.row_count,
         column_count=context.dataset_identity.column_count,
         column_schema=context.column_schema,
+        null_counts=context.null_counts,
         diagnostic_report=ProviderDiagnosticReport(
             issues=tuple(
                 PlanningDiagnosticIssue(

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from datachef.contracts import (
+    NormalizeNumericTextParameters,
     CastColumnParameters,
     CastErrorPolicy,
     CastTarget,
@@ -111,6 +112,40 @@ class RuleBasedPlanner:
                         diagnostic_issue_ids=(issue.issue_id,),
                         rationale="The deterministic profile found numeric text.",
                         expected_effect="Convert parseable numeric text to a numeric dtype.",
+                        risk=RiskLevel.MEDIUM,
+                        requires_human_approval=True,
+                    )
+                )
+            elif issue.kind is DiagnosticIssueKind.CANDIDATE_NUMERIC_TEXT_NOISE:
+                # Two operations in order, citing one issue: the column is
+                # numeric text carrying symbols, which justifies both stripping
+                # the symbols and the cast that becomes possible afterwards.
+                column = issue.affected_columns[0]
+                operations.append(
+                    TransformationOperation(
+                        operation_id=f"op-normalize-{column}",
+                        operation_type=OperationType.NORMALIZE_NUMERIC_TEXT,
+                        target_columns=(column,),
+                        parameters=NormalizeNumericTextParameters(),
+                        diagnostic_issue_ids=(issue.issue_id,),
+                        rationale="The deterministic profile found numeric text carrying symbols.",
+                        expected_effect="Strip currency symbols, thousands separators and surrounding whitespace.",
+                        risk=RiskLevel.LOW,
+                        requires_human_approval=True,
+                    )
+                )
+                operations.append(
+                    TransformationOperation(
+                        operation_id=f"op-cast-{column}",
+                        operation_type=OperationType.CAST_COLUMN,
+                        target_columns=(column,),
+                        parameters=CastColumnParameters(
+                            target_type=CastTarget.NUMERIC,
+                            errors=CastErrorPolicy.COERCE,
+                        ),
+                        diagnostic_issue_ids=(issue.issue_id,),
+                        rationale="The normalized text is now parseable as a number.",
+                        expected_effect="Convert the stripped numeric text to a numeric dtype.",
                         risk=RiskLevel.MEDIUM,
                         requires_human_approval=True,
                     )
