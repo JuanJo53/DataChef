@@ -12,7 +12,9 @@ from typing import Any
 
 import streamlit as st
 
-from datachef.application import ArtifactSet, DashboardHandoff
+import pandas as pd
+
+from datachef.application import ArtifactSet, DashboardHandoff, DashboardSummary
 from ui import state as ui_state
 from ui.charts import render_charts
 from ui.screens import render_failure, render_findings, render_result
@@ -52,6 +54,143 @@ def _render_downloads(bundle: ArtifactSet) -> None:
         )
 
 
+
+
+def _render_readiness(summary: DashboardSummary) -> None:
+    """Top band: did it work, how much moved, is it ready to model.
+
+    Every number is read off the deterministic summary. Nothing is recomputed
+    here, so the screen cannot disagree with the QA report it is describing.
+    """
+
+    st.markdown("### Data readiness")
+    if summary.modelling_ready:
+        st.success(summary.readiness_headline)
+    else:
+        st.warning(summary.readiness_headline)
+
+    rows, columns, missing, duplicates = st.columns(4)
+    rows.metric(
+        "Rows",
+        f"{summary.rows_after:,}",
+        delta=f"-{summary.rows_removed:,}" if summary.rows_removed else "unchanged",
+        delta_color="off",
+    )
+    columns.metric(
+        "Columns",
+        f"{summary.columns_after:,}",
+        delta=(
+            f"-{len(summary.removed_columns)}"
+            if summary.removed_columns
+            else "unchanged"
+        ),
+        delta_color="off",
+    )
+    missing.metric(
+        "Missing values",
+        f"{summary.nulls_after_total:,}",
+        delta=f"-{summary.nulls_filled:,}" if summary.nulls_filled else "unchanged",
+        delta_color="off",
+    )
+    duplicates.metric(
+        "Duplicate rows",
+        f"{summary.duplicate_rows_after:,}",
+        delta=(
+            f"-{summary.duplicate_rows_before - summary.duplicate_rows_after:,}"
+            if summary.duplicate_rows_before > summary.duplicate_rows_after
+            else "unchanged"
+        ),
+        delta_color="off",
+    )
+
+    if summary.target_column is None:
+        st.caption(
+            "No target column was named in the objective, so modelling readiness "
+            "is reported for the table as a whole."
+        )
+    elif summary.target_is_usable:
+        st.caption(
+            f"Target `{summary.target_column}` survived the plan and carries no "
+            "missing values."
+        )
+    else:
+        st.caption(
+            f"Target `{summary.target_column}` is not usable yet: it was removed "
+            "or still carries missing values."
+        )
+
+
+def _render_change_detail(summary: DashboardSummary) -> None:
+    """Middle band: what happened to each column, and which operations did it."""
+
+    st.markdown("### What changed")
+    missingness = pd.DataFrame(
+        [
+            {
+                "column": item.column,
+                "dtype": item.dtype,
+                "missing before": item.nulls_before,
+                "missing after": item.nulls_after,
+                "distinct": item.distinct_count,
+                "target": "yes" if item.is_target else "",
+            }
+            for item in summary.columns
+        ]
+    )
+    st.caption("Missing values per surviving column, before and after the plan.")
+    st.dataframe(missingness, use_container_width=True, hide_index=True)
+
+    if summary.operations:
+        st.caption("Operations the human approved, in the order they ran.")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "operation": item.operation_type.value,
+                        "columns": ", ".join(item.target_columns) or "whole row",
+                        "detail": item.detail,
+                        "rows": f"{item.rows_before} -> {item.rows_after}",
+                    }
+                    for item in summary.operations
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown("**Removed columns**")
+        if summary.removed_columns:
+            for column in summary.removed_columns:
+                st.markdown(f"- `{column}`")
+        else:
+            st.caption("None; every column survived.")
+    with right:
+        st.markdown("**Rows and duplicates**")
+        st.markdown(
+            f"- Rows {summary.rows_before:,} to {summary.rows_after:,} "
+            f"({summary.row_loss_pct:.2f}% removed)"
+        )
+        st.markdown(
+            f"- Duplicate rows {summary.duplicate_rows_before:,} to "
+            f"{summary.duplicate_rows_after:,}"
+        )
+        if summary.duplicate_keys_before is not None:
+            st.markdown(
+                f"- Duplicate keys {summary.duplicate_keys_before:,} to "
+                f"{summary.duplicate_keys_after:,}"
+            )
+
+    for message in summary.unresolved_issues:
+        st.warning(message)
+
+
+def _render_summary(summary: DashboardSummary) -> None:
+    _render_readiness(summary)
+    _render_change_detail(summary)
+
+
 def _render_dashboard(handoff: DashboardHandoff, preview_enabled: bool) -> None:
     context = handoff.context
     st.markdown("### Dashboard")
@@ -88,6 +227,10 @@ def render(controller: Any, state: Any) -> None:
         _render_downloads(bundle)
     else:
         render_failure(bundle)
+
+    summary = controller.build_dashboard_summary()
+    if isinstance(summary, DashboardSummary):
+        _render_summary(summary)
 
     handoff = controller.build_dashboard_handoff()
     if isinstance(handoff, DashboardHandoff):

@@ -494,18 +494,26 @@ def _operation_preservation_results(
             assert isinstance(operation.parameters, DropColumnParameters)
 
             dropped = tuple(operation.target_columns)
-            expected_columns = {
-                column for column in source.columns if column not in dropped
+            # Every column any drop in this plan removes. A per-operation
+            # invariant is handed the whole-plan frames, so a second drop must
+            # not make the first one look like a violation.
+            all_dropped = {
+                column
+                for other in plan.operations
+                if other.operation_type is OperationType.DROP_COLUMN
+                for column in other.target_columns
             }
-            actual_columns = set(transformed.columns)
-
             absent = all(column not in transformed.columns for column in dropped)
-            columns_intact = actual_columns == expected_columns
+            # Count arithmetic rather than comparing name sets: a RENAME_COLUMN
+            # elsewhere in the plan changes a name without removing a column, and
+            # must not read as a column having vanished.
+            expected_count = len(source.columns) - len(all_dropped)
+            actual_count = len(transformed.columns)
             held = bool(
                 applied
                 and rows_held
                 and absent
-                and columns_intact
+                and actual_count == expected_count
             )
 
             results.append(
@@ -518,8 +526,8 @@ def _operation_preservation_results(
                         "Dropping columns must preserve the row count, remove every "
                         "named dropped column, and preserve the surviving column structure."
                     ),
-                    observed_value=len(actual_columns),
-                    expected_value=len(expected_columns),
+                    observed_value=actual_count,
+                    expected_value=expected_count,
                 )
             )
     return tuple(results)

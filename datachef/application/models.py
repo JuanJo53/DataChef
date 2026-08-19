@@ -14,6 +14,10 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from datachef.contracts import (
+    DropColumnParameters,
+    ImputeMissingParameters,
+    ImputeStrategy,
+    RequestedOperation,
     CastColumnParameters,
     CastTarget,
     DatasetIdentity,
@@ -196,7 +200,10 @@ class UploadFailure(StrictApplicationModel):
 
 
 RequestedParameters = Annotated[
-    CastColumnParameters | DeduplicateByKeysParameters,
+    CastColumnParameters
+    | DeduplicateByKeysParameters
+    | DropColumnParameters
+    | ImputeMissingParameters,
     Field(discriminator="kind"),
 ]
 
@@ -242,9 +249,34 @@ class RequestedTransformation(StrictApplicationModel):
                 raise ValueError("deduplication keys must contain non-whitespace text")
             if len(set(self.parameters.keys)) != len(self.parameters.keys):
                 raise ValueError("deduplication keys must be unique")
+        elif self.operation_type is OperationType.DROP_COLUMN:
+            if not isinstance(self.parameters, DropColumnParameters):
+                raise ValueError("column drop requests require drop parameters")
+            if len(set(self.target_columns)) != len(self.target_columns):
+                raise ValueError("dropped columns must be unique")
+        elif self.operation_type is OperationType.IMPUTE_MISSING:
+            if not isinstance(self.parameters, ImputeMissingParameters):
+                raise ValueError("imputation requests require imputation parameters")
+            if len(self.target_columns) != 1:
+                raise ValueError("imputation requests target exactly one column")
+            if (
+                self.parameters.strategy is ImputeStrategy.CONSTANT
+                and self.parameters.constant_value is None
+            ):
+                raise ValueError("constant imputation requests require a constant")
         else:
             raise ValueError("requested operation is not available offline")
         return self
+
+    def as_requested_operation(self) -> RequestedOperation:
+        """Project into the contract the deterministic planner consumes."""
+
+        return RequestedOperation(
+            request_id=self.request_id,
+            operation_type=self.operation_type,
+            target_columns=self.target_columns,
+            parameters=self.parameters,
+        )
 
 
 class ApplicationFinding(StrictApplicationModel):

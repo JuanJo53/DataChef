@@ -351,6 +351,7 @@ def diagnose_raw_dataframe(
             null_count=int(item["nulls"]),
             null_pct=float(item["null_pct"]),
             unique_count=int(item["unique"]),
+            zero_count=int(item["zero_count"]),
             is_primary_key_candidate=bool(item["is_pk_candidate"]),
             possible_pii=bool(item["is_pii"]),
         )

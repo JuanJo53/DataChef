@@ -52,6 +52,19 @@ class AgentPlanner:
     unsupported_requests: tuple[str, ...] = ()
     _runner: object | None = None
 
+    def accept_requests(self, requested_operations: tuple) -> None:
+        """Hand the session's typed requests to the deterministic fallback.
+
+        The live crew is instructed to use the proposal tools for what the
+        objective asks. If it fails, times out, or returns a plan that does not
+        validate, the fallback must still account for the user's explicit
+        requests rather than silently producing a diagnosis-only plan.
+        """
+
+        accept = getattr(self.fallback, "accept_requests", None)
+        if callable(accept):
+            accept(tuple(requested_operations))
+
     def propose(
         self,
         context: PlanningContext,

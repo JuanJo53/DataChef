@@ -221,6 +221,7 @@ class ColumnProfile(StrictContract):
     null_count: int = Field(ge=0)
     null_pct: float = Field(ge=0, le=100)
     unique_count: int = Field(ge=0)
+    zero_count: int = Field(ge=0)
     is_primary_key_candidate: bool
     possible_pii: bool
 
@@ -338,6 +339,11 @@ class PlanningQuestion(StrictContract):
     relevant_columns: tuple[str, ...] = Field(default_factory=tuple)
     confidence: float = Field(ge=0, le=1)
 
+class PlanningColumnStatistics(StrictContract):
+    column: str
+    null_count: int = Field(ge=0)
+    zero_count: int = Field(ge=0)
+
 
 class PlanningContext(StrictContract):
     """Local row-free planning state; never serialize this object to a provider."""
@@ -352,6 +358,7 @@ class PlanningContext(StrictContract):
     questions: tuple[PlanningQuestion, ...] = Field(default_factory=tuple)
     supported_operations: tuple[OperationType, ...]
     privacy_manifest: PrivacyManifest
+    column_statistics: tuple[PlanningColumnStatistics, ...] = Field(default_factory=tuple)
 
 
 class ProviderPrivacyManifest(StrictContract):
@@ -391,6 +398,7 @@ class ProviderPlanningPayload(StrictContract):
     questions: tuple[PlanningQuestion, ...] = Field(default_factory=tuple)
     supported_operations: tuple[OperationType, ...]
     privacy_manifest: ProviderPrivacyManifest
+    column_statistics: tuple[PlanningColumnStatistics, ...] = Field(default_factory=tuple)
 
 
 class TrimWhitespaceParameters(StrictContract):
@@ -495,6 +503,21 @@ class TransformationOperation(StrictContract):
         if not self.diagnostic_issue_ids and not self.user_requirement_ids:
             raise ValueError("operation must link to an issue or user requirement")
         return self
+
+
+class RequestedOperation(StrictContract):
+    """One typed operation the user explicitly asked for, compiled locally.
+
+    The carrier between the application layer, which compiles a free-form
+    objective into typed requests, and the deterministic planner, which must
+    account for them. It holds no free-form text: an operation type, the target
+    columns, and the same closed parameter union the executor allow-lists.
+    """
+
+    request_id: str = Field(min_length=1)
+    operation_type: OperationType
+    target_columns: tuple[str, ...] = Field(min_length=1)
+    parameters: OperationParameters
 
 
 class TransformationPlan(StrictContract):

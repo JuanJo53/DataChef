@@ -7,6 +7,7 @@ from typing import Protocol
 
 from datachef.contracts import (
     NormalizeNumericTextParameters,
+    RequestedOperation,
     CastColumnParameters,
     CastErrorPolicy,
     CastTarget,
@@ -89,9 +90,28 @@ class SequenceReviewer:
 
 @dataclass
 class RuleBasedPlanner:
-    """Offline fallback that proposes only diagnosis-grounded MVP operations."""
+    """Offline planner: diagnosis-grounded operations plus explicit user requests.
+
+    Two grounds for proposing an operation, and no others. A diagnostic issue is
+    evidence the table has a defect. A ``RequestedOperation`` is evidence the
+    user asked for something specific, compiled locally from their objective by
+    ``datachef.application.request_compiler``; it cites the request rather than
+    an issue, which is what ``user_requirement_ids`` exists for.
+
+    Requested drops are emitted last so that a column another operation needs is
+    still present when that operation runs.
+    """
 
     calls: int = 0
+    requested_operations: tuple[RequestedOperation, ...] = ()
+
+    def accept_requests(
+        self,
+        requested_operations: tuple[RequestedOperation, ...],
+    ) -> None:
+        """Hand the planner the typed requests compiled for this session."""
+
+        self.requested_operations = tuple(requested_operations)
 
     def propose(self, context: PlanningContext, *, attempt: int) -> TransformationPlan:
         del attempt
@@ -167,12 +187,21 @@ class RuleBasedPlanner:
                         requires_human_approval=True,
                     )
                 )
-        return create_transformation_plan(
+        # Requests are enforced by one shared, idempotent layer so the
+        # deterministic planner and the live planner cannot drift apart.
+        from datachef.planning.requests import enforce_requested_operations
+
+        diagnosis_plan = create_transformation_plan(
             dataset_id=context.dataset_identity.dataset_id,
             dataset_fingerprint=context.dataset_identity.fingerprint,
             version=1,
             operations=tuple(operations),
             summary="Offline diagnosis-grounded transformation plan.",
+        )
+        return enforce_requested_operations(
+            diagnosis_plan,
+            self.requested_operations,
+            context,
         )
 
 

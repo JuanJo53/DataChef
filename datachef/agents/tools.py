@@ -286,6 +286,14 @@ def inspect_profile(draft: PlanDraft) -> dict[str, Any]:
             }
             for metric in report.key_duplicate_metrics
         ],
+        "column_statistics": [
+            {
+                "column": statistic.column,
+                "null_count": statistic.null_count,
+                "zero_count": statistic.zero_count,
+            }
+            for statistic in context.column_statistics
+        ],
         "issues": [
             {
                 "issue_id": issue.issue_id,

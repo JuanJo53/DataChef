@@ -10,6 +10,10 @@ from datachef.planning.interfaces import (
 )
 from datachef.planning.plan import create_transformation_plan
 from datachef.planning.review import ReviewEvidenceError, accept_review
+from datachef.planning.requests import (
+    RequestAwarePlanner,
+    enforce_requested_operations,
+)
 from datachef.planning.validation import validate_plan
 
 __all__ = [
@@ -22,5 +26,7 @@ __all__ = [
     "create_transformation_plan",
     "ReviewEvidenceError",
     "accept_review",
+    "RequestAwarePlanner",
+    "enforce_requested_operations",
     "validate_plan",
 ]

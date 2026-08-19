@@ -10,6 +10,10 @@ from datachef.application.artifacts import (
     build_artifact_set,
 )
 from datachef.application.dashboard import (
+    AppliedOperation,
+    ColumnReadiness,
+    DashboardSummary,
+    build_dashboard_summary,
     DashboardContext,
     DashboardFailure,
     DashboardFailureCode,
@@ -66,6 +70,10 @@ __all__ = [
     "DashboardFailure",
     "DashboardFailureCode",
     "DashboardHandoff",
+    "DashboardSummary",
+    "AppliedOperation",
+    "ColumnReadiness",
+    "build_dashboard_summary",
     "DataChefController",
     "DownloadArtifact",
     "build_artifact_set",

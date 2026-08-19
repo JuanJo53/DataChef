@@ -27,6 +27,7 @@ from datachef.contracts import (
     SuggestedQuestion,
     UserIntent,
 )
+from datachef.contracts.models import PlanningColumnStatistics
 
 
 _EMAIL = re.compile(r"(?i)\b[^\s@]+@[^\s@]+\.[^\s@]+\b")
@@ -227,6 +228,15 @@ def build_planning_context(
             ",".join(operation.value for operation in supported_operations),
         )
     )
+    column_statistics = tuple(
+        PlanningColumnStatistics(
+            column=aliases[profile.name],
+            null_count=int(profile.null_count),
+            zero_count=int(profile.zero_count),
+        )
+        for profile in report.column_profiles
+    )
+
     context_hash = sha256(identity_material.encode("utf-8")).hexdigest()
     return PlanningContext(
         context_id=f"context-{context_hash[:16]}",
@@ -241,6 +251,7 @@ def build_planning_context(
         questions=safe_questions,
         supported_operations=supported_operations,
         privacy_manifest=manifest,
+        column_statistics=column_statistics,
     )
 
 
@@ -255,6 +266,7 @@ def build_provider_planning_payload(
         column_count=context.dataset_identity.column_count,
         column_schema=context.column_schema,
         null_counts=context.null_counts,
+        column_statistics=context.column_statistics,
         diagnostic_report=ProviderDiagnosticReport(
             issues=tuple(
                 PlanningDiagnosticIssue(
