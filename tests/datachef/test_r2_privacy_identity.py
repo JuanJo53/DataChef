@@ -110,8 +110,61 @@ def test_categorical_fingerprint_is_stable_across_processes() -> None:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=15,
         )
         fingerprints.append(completed.stdout.strip())
 
     assert fingerprints[0] == fingerprints[1]
+
+# def test_null_counts_follow_provider_aliases() -> None:
+#     source = pd.DataFrame(
+#         {
+#             "internal_code": [1, None, 3],
+#             "measure": [10, 20, 30],
+#         }
+#     )
+#     report = diagnose_raw_dataframe(source)
+#     intent = UserIntent(
+#         intent_id="null-count-alias",
+#         protected_columns=("internal_code",),
+#     )
+
+#     context = build_planning_context(report, intent, ())
+#     payload = build_provider_planning_payload(context)
+
+#     alias = next(
+#         name
+#         for name in payload.null_counts
+#         if name.startswith("__dc_private_")
+#     )
+
+#     assert payload.null_counts[alias] == 1
+#     assert "internal_code" not in payload.null_counts
+
+def test_provider_null_counts_follow_column_aliases() -> None:
+    source = pd.DataFrame(
+        {
+            "internal_code": [1, None, 3],
+            "measure": [10, 20, 30],
+        }
+    )
+    report = diagnose_raw_dataframe(source)
+    intent = UserIntent(
+        intent_id="null-count-alias",
+        protected_columns=("internal_code",),
+    )
+
+    context = build_planning_context(report, intent, ())
+    payload = build_provider_planning_payload(context)
+
+    aliases = tuple(
+        name
+        for name in payload.null_counts
+        if name.startswith("__dc_private_")
+    )
+
+    assert len(aliases) == 1
+    assert payload.null_counts[aliases[0]] == 1
+    assert "internal_code" not in payload.null_counts

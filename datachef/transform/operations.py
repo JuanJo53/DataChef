@@ -9,6 +9,10 @@ import pandas as pd
 
 from datachef.contracts import (
     CastColumnParameters,
+    DropColumnParameters,
+    ImputeMissingParameters,
+    ImputeStrategy,
+    NormalizeNumericTextParameters,
     CastErrorPolicy,
     CastTarget,
     DeduplicateByKeysParameters,
@@ -28,6 +32,10 @@ class OperationEffect:
     dataframe: pd.DataFrame
     affected_cell_count: int
     introduced_null_count: int | None = None
+    # Measured by handlers that rewrite existing values, so QA can verify the
+    # rewrite rather than trust it. See _impute_missing.
+    changed_non_null_count: int | None = None
+    filled_null_count: int | None = None
 
 
 OperationHandler = Callable[[pd.DataFrame, TransformationOperation], OperationEffect]
@@ -190,6 +198,119 @@ def _deduplicate_by_keys(
     )
 
 
+
+# A closed set, enumerated. Currency is a named noise class, not a pattern the
+# caller supplies, so the operation stays inside the allow-list.
+_CURRENCY_SYMBOLS = frozenset("$€£¥₹₩₽")
+_THOUSANDS_SEPARATORS = frozenset(",_")
+
+
+def _strip_numeric_noise(
+    value: object,
+    parameters: NormalizeNumericTextParameters,
+) -> object:
+    """Remove named noise classes. Never returns null for a non-null input."""
+
+    if not isinstance(value, str):
+        return value
+    text = value
+    if parameters.strip_currency_symbols:
+        text = "".join(
+            character for character in text if character not in _CURRENCY_SYMBOLS
+        )
+    if parameters.strip_thousands_separators:
+        text = "".join(
+            character for character in text if character not in _THOUSANDS_SEPARATORS
+        )
+    if parameters.strip_whitespace:
+        text = text.strip()
+    return text
+
+
+def _normalize_numeric_text(
+    dataframe: pd.DataFrame,
+    operation: TransformationOperation,
+) -> OperationEffect:
+    parameters = operation.parameters
+    assert isinstance(parameters, NormalizeNumericTextParameters)
+    changed = 0
+    introduced = 0
+    for column in operation.target_columns:
+        before = dataframe[column].copy(deep=True)
+        after = before.map(lambda value: _strip_numeric_noise(value, parameters))
+        dataframe[column] = after
+        changed += _changed_cells(before, after)
+        introduced += int((before.notna() & after.isna()).sum())
+    return OperationEffect(
+        dataframe=dataframe,
+        affected_cell_count=changed,
+        introduced_null_count=introduced,
+    )
+
+
+def _drop_column(
+    dataframe: pd.DataFrame,
+    operation: TransformationOperation,
+) -> OperationEffect:
+    parameters = operation.parameters
+    assert isinstance(parameters, DropColumnParameters)
+    columns = list(operation.target_columns)
+    # Raises KeyError on an absent column, which the runner turns into a typed
+    # failure. Dropping something that is not there is never treated as success.
+    result = dataframe.drop(columns=columns)
+    return OperationEffect(
+        dataframe=result,
+        affected_cell_count=int(len(dataframe) * len(columns)),
+    )
+
+
+def _impute_fill_value(
+    series: pd.Series,
+    parameters: ImputeMissingParameters,
+) -> object:
+    if parameters.strategy is ImputeStrategy.CONSTANT:
+        if parameters.constant_value is None:
+            raise ValueError("constant imputation requires a constant value")
+        return parameters.constant_value
+    if parameters.strategy is ImputeStrategy.MODE:
+        modes = series.mode(dropna=True)
+        if modes.empty:
+            raise ValueError("no mode exists for this column")
+        return modes.iloc[0]
+    if parameters.strategy is ImputeStrategy.MEAN:
+        return series.mean()
+    if parameters.strategy is ImputeStrategy.MEDIAN:
+        return series.median()
+    raise ValueError("unsupported imputation strategy")
+
+
+def _impute_missing(
+    dataframe: pd.DataFrame,
+    operation: TransformationOperation,
+) -> OperationEffect:
+    parameters = operation.parameters
+    assert isinstance(parameters, ImputeMissingParameters)
+    column = operation.target_columns[0]
+    before = dataframe[column].copy(deep=True)
+    missing_before = before.isna()
+    if not bool(missing_before.any()):
+        # Nothing to fill. Refused rather than silently applied so the operation
+        # can never report an effect it did not have.
+        raise ValueError("imputation requires at least one missing value")
+    after = before.fillna(_impute_fill_value(before, parameters))
+    dataframe[column] = after
+    equal = before.eq(after) | (before.isna() & after.isna())
+    rewritten = ~equal.fillna(False)
+    changed_non_null = int((rewritten & before.notna()).sum())
+    filled = int((missing_before & after.notna()).sum())
+    return OperationEffect(
+        dataframe=dataframe,
+        affected_cell_count=filled,
+        changed_non_null_count=changed_non_null,
+        filled_null_count=filled,
+    )
+
+
 OPERATION_CATALOGUE: dict[OperationType, OperationDefinition] = {
     OperationType.TRIM_WHITESPACE: OperationDefinition(
         OperationType.TRIM_WHITESPACE,
@@ -232,6 +353,27 @@ OPERATION_CATALOGUE: dict[OperationType, OperationDefinition] = {
         _deduplicate_by_keys,
         material=True,
         may_drop_rows=True,
+    ),
+    OperationType.DROP_COLUMN: OperationDefinition(
+        OperationType.DROP_COLUMN,
+        DropColumnParameters,
+        _drop_column,
+        material=True,
+        may_drop_rows=False,
+    ),
+    OperationType.IMPUTE_MISSING: OperationDefinition(
+        OperationType.IMPUTE_MISSING,
+        ImputeMissingParameters,
+        _impute_missing,
+        material=True,
+        may_drop_rows=False,
+    ),
+    OperationType.NORMALIZE_NUMERIC_TEXT: OperationDefinition(
+        OperationType.NORMALIZE_NUMERIC_TEXT,
+        NormalizeNumericTextParameters,
+        _normalize_numeric_text,
+        material=True,
+        may_drop_rows=False,
     ),
 }
 

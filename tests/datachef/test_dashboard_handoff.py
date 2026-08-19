@@ -526,6 +526,8 @@ def test_application_import_graph_never_loads_the_legacy_dashboard_or_providers(
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=180,
     )
 
@@ -663,6 +665,8 @@ def test_credentialed_offline_handoff_touches_no_provider_or_network() -> None:
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=300,
     )
 

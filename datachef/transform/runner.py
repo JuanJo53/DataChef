@@ -58,6 +58,8 @@ def run_allowlisted_plan(
                     rows_after=len(working),
                     affected_cell_count=effect.affected_cell_count,
                     introduced_null_count=effect.introduced_null_count,
+                    changed_non_null_count=effect.changed_non_null_count,
+                    filled_null_count=effect.filled_null_count,
                 )
             )
         except Exception:

@@ -50,6 +50,74 @@ def build_transformation_requests(
     return tuple(built)
 
 
+def render_diagnosis(session: Any) -> None:
+    """Render the deterministic diagnosis the controller already produced.
+
+    Shared because more than one screen shows it: Diagnostics is where it is
+    read, and Upload and Objective repeat it in place so a user revisiting
+    either does not have to navigate away to remember what the file looked
+    like. Values are read off session evidence; nothing is derived here.
+    """
+
+    report = session.display_diagnostic_report
+    if report is None:
+        return
+    st.markdown("### Deterministic diagnosis")
+    evidence = report.legacy_evidence
+    left, middle, right = st.columns(3)
+    left.metric("Health score", evidence.health_score)
+    middle.metric("Grade", evidence.health_grade)
+    right.metric("Duplicate rows", report.duplicate_row_count)
+    if not report.issues:
+        st.success("No diagnostic issues were detected.")
+        return
+    st.markdown("#### Issues")
+    for issue in report.issues:
+        columns = ", ".join(issue.affected_columns) or "—"
+        st.markdown(
+            f"- `{issue.severity.value}` **{issue.title}** "
+            f"({issue.kind.value}) — columns: {columns}"
+        )
+
+
+def render_validation(state_evidence: Any, intent: Any) -> None:
+    """Show the validation facts the application already produced.
+
+    This renders evidence only: codes, messages, operation IDs, and numbers.
+    It never recommends a threshold or interprets the outcome.
+    """
+
+    validation = state_evidence.plan_validation
+    if validation is None:
+        return
+    st.markdown("### Validation")
+    left, right = st.columns(2)
+    left.metric(
+        "Estimated cumulative row loss",
+        f"{validation.cumulative_estimated_row_loss_pct:.2f}%",
+    )
+    if intent is not None:
+        right.metric(
+            "Your acceptable row loss",
+            f"{intent.acceptable_row_loss_pct:.2f}%",
+        )
+    if validation.row_loss_estimates:
+        st.markdown("#### Estimated row removal per operation")
+        for estimate in validation.row_loss_estimates:
+            st.markdown(
+                f"- `{estimate.operation_id}` — {estimate.estimated_rows} row(s), "
+                f"{estimate.estimated_pct:.2f}%"
+            )
+    if validation.findings:
+        st.markdown("#### Validation findings")
+        for finding in validation.findings:
+            operation = f" (`{finding.operation_id}`)" if finding.operation_id else ""
+            st.markdown(
+                f"- `{finding.severity.value}` **{finding.code}**{operation} — "
+                f"{finding.message}"
+            )
+
+
 def render_findings(findings: Any) -> None:
     """Render sanitized application findings only; never exception text."""
 
@@ -87,16 +155,24 @@ def has_blocking(findings: Any) -> bool:
 
 
 def render_screen(screen: ScreenId, controller: Any, state: Any) -> None:
-    from ui.screens import approval, intent, plan, qa, results, upload
+    from ui.screens import (
+        approval,
+        dashboard,
+        diagnostics,
+        intent,
+        plan,
+        results,
+        upload,
+    )
 
     renderers = {
         ScreenId.UPLOAD: upload.render,
-        ScreenId.DIAGNOSE: upload.render,
+        ScreenId.DIAGNOSE: diagnostics.render,
         ScreenId.INTENT: intent.render,
         ScreenId.PLAN: plan.render,
         ScreenId.APPROVAL: approval.render,
-        ScreenId.QA: qa.render,
         ScreenId.RESULTS: results.render,
+        ScreenId.DASHBOARD: dashboard.render,
     }
     renderers[screen](controller, state)
 
@@ -104,8 +180,10 @@ def render_screen(screen: ScreenId, controller: Any, state: Any) -> None:
 __all__ = [
     "build_transformation_requests",
     "has_blocking",
+    "render_diagnosis",
     "render_failure",
     "render_findings",
     "render_result",
+    "render_validation",
     "render_screen",
 ]

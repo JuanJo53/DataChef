@@ -14,6 +14,7 @@ Streamlit.
 from __future__ import annotations
 
 import copy
+import re
 from enum import StrEnum
 from hashlib import sha256
 from typing import Any
@@ -24,9 +25,13 @@ from pydantic import Field
 from datachef.application.artifacts import ArtifactFailure, gold_evidence_failure
 from datachef.application.models import StrictApplicationModel
 from datachef.contracts import (
+    DiagnosticResolution,
     DownstreamUse,
     InvariantStatus,
+    OperationType,
+    QAStatus,
     SuggestedQuestion,
+    TransformationOperation,
     UserIntent,
 )
 from datachef.workflow import WorkflowRuntime
@@ -341,11 +346,275 @@ def build_dashboard_handoff(
     return DashboardHandoff(context=context, gold=gold, spec=_retitled(spec))
 
 
+_TARGET_PATTERN = re.compile(
+    r"(?:predict|predicting|target(?:\s+variable)?(?:\s+is)?|forecast)\b",
+    re.IGNORECASE,
+)
+
+
+def _target_column(user_goal: str, columns: tuple[str, ...]) -> str | None:
+    """The column the objective says it wants to predict, if it names one.
+
+    Read locally from the objective text, which never leaves this process, and
+    resolved only to a column that actually survives in gold. Nothing is
+    inferred when the objective does not say: an absent target is reported as
+    absent rather than guessed.
+    """
+
+    if not user_goal:
+        return None
+    match = _TARGET_PATTERN.search(user_goal)
+    if match is None:
+        return None
+    window = user_goal[match.end() : match.end() + 120].lower()
+    best: tuple[int, str] | None = None
+    for column in columns:
+        found = re.search(
+            r"(?<![0-9A-Za-z_])" + re.escape(column.lower()) + r"(?![0-9A-Za-z_])",
+            window,
+        )
+        if found is None:
+            continue
+        if best is None or found.start() < best[0]:
+            best = (found.start(), column)
+    return best[1] if best else None
+
+
+class ColumnReadiness(StrictApplicationModel):
+    """One surviving column, described only by deterministic counts."""
+
+    column: str = Field(min_length=1)
+    dtype: str = Field(min_length=1)
+    nulls_before: int = Field(ge=0)
+    nulls_after: int = Field(ge=0)
+    distinct_count: int = Field(ge=0)
+    is_target: bool = False
+
+    @property
+    def complete(self) -> bool:
+        return self.nulls_after == 0
+
+
+class AppliedOperation(StrictApplicationModel):
+    """One approved operation, as the human approved it."""
+
+    operation_id: str = Field(min_length=1)
+    operation_type: OperationType
+    target_columns: tuple[str, ...] = Field(default_factory=tuple)
+    detail: str = ""
+    rows_before: int = Field(ge=0)
+    rows_after: int = Field(ge=0)
+
+
+class DashboardSummary(StrictApplicationModel):
+    """Deterministic answers to the questions a finished run leaves behind.
+
+    Every field is copied or counted from evidence that already passed the gate:
+    the QA report, the execution record, the approved plan and the verified gold
+    frame. Nothing here is modelled, sampled or inferred, and no cell value is
+    carried -- only counts, dtypes, column names, and the operation metadata the
+    human already approved.
+    """
+
+    qa_status: QAStatus
+    plan_id: str = Field(min_length=1)
+    qa_report_id: str = Field(min_length=1)
+    rows_before: int = Field(ge=0)
+    rows_after: int = Field(ge=0)
+    columns_before: int = Field(ge=0)
+    columns_after: int = Field(ge=0)
+    row_loss_pct: float = Field(ge=0, le=100)
+    removed_columns: tuple[str, ...] = Field(default_factory=tuple)
+    retained_columns: tuple[str, ...] = Field(default_factory=tuple)
+    renamed_columns: tuple[str, ...] = Field(default_factory=tuple)
+    duplicate_rows_before: int = Field(ge=0)
+    duplicate_rows_after: int = Field(ge=0)
+    duplicate_keys_before: int | None = None
+    duplicate_keys_after: int | None = None
+    nulls_before_total: int = Field(ge=0)
+    nulls_after_total: int = Field(ge=0)
+    columns: tuple[ColumnReadiness, ...] = Field(default_factory=tuple)
+    operations: tuple[AppliedOperation, ...] = Field(default_factory=tuple)
+    target_column: str | None = None
+    warnings: tuple[str, ...] = Field(default_factory=tuple)
+    unresolved_issues: tuple[str, ...] = Field(default_factory=tuple)
+
+    @property
+    def rows_removed(self) -> int:
+        return max(0, self.rows_before - self.rows_after)
+
+    @property
+    def nulls_filled(self) -> int:
+        return max(0, self.nulls_before_total - self.nulls_after_total)
+
+    @property
+    def target_is_usable(self) -> bool:
+        """A target is usable when it survived and carries no missing values."""
+
+        if self.target_column is None:
+            return False
+        return any(
+            item.column == self.target_column and item.complete
+            for item in self.columns
+        )
+
+    @property
+    def modelling_ready(self) -> bool:
+        """QA passed, rows and columns remain, and nothing is still missing.
+
+        Deliberately strict and deliberately simple: it reports the state of the
+        table rather than judging a model. A target that was named but is still
+        incomplete is not ready, and neither is a table with residual nulls.
+        """
+
+        return bool(
+            self.qa_status is QAStatus.PASS
+            and self.rows_after > 0
+            and self.columns_after > 0
+            and self.nulls_after_total == 0
+            and (self.target_column is None or self.target_is_usable)
+        )
+
+    @property
+    def readiness_headline(self) -> str:
+        if self.qa_status is not QAStatus.PASS:
+            return "Quality assurance did not pass; this table is not ready."
+        if self.modelling_ready:
+            return "Quality assurance passed and no missing values remain."
+        if self.nulls_after_total:
+            return (
+                f"Quality assurance passed, but {self.nulls_after_total} missing "
+                "value(s) remain."
+            )
+        return "Quality assurance passed."
+
+
+def _operation_detail(operation: TransformationOperation) -> str:
+    """A short, closed description. Never the agent's free-form rationale."""
+
+    parameters = operation.parameters
+    strategy = getattr(parameters, "strategy", None)
+    if strategy is not None:
+        return f"strategy {strategy.value}"
+    keys = getattr(parameters, "keys", None)
+    if keys:
+        return "keys " + ", ".join(keys)
+    target_type = getattr(parameters, "target_type", None)
+    if target_type is not None:
+        return f"to {target_type.value}"
+    new_name = getattr(parameters, "new_name", None)
+    if new_name:
+        return f"renamed to {new_name}"
+    return ""
+
+
+def build_dashboard_summary(
+    runtime: object,
+    intent: object,
+) -> "DashboardSummary | DashboardFailure":
+    """Summarize a verified run. Gated exactly like every other gold consumer."""
+
+    blocked = gold_evidence_failure(runtime)
+    if blocked is not None:
+        return _translated(blocked)
+    if not isinstance(intent, UserIntent):
+        return _failure(DashboardFailureCode.EVIDENCE_INCOMPLETE)
+    assert isinstance(runtime, WorkflowRuntime)
+    state = runtime.state
+    report = state.qa_report
+    plan = state.transformation_plan
+    result = state.execution_result
+    source_report = state.diagnostic_report
+    gold = runtime.gold_dataframe
+    assert report is not None and plan is not None and result is not None
+    assert gold is not None
+
+    nulls_before = {
+        change.column: change.before for change in report.null_count_changes
+    }
+    profiles = (
+        {profile.name: profile for profile in source_report.column_profiles}
+        if source_report is not None
+        else {}
+    )
+    retained = tuple(str(column) for column in gold.columns)
+    target = _target_column(intent.user_goal, retained)
+
+    readiness: list[ColumnReadiness] = []
+    for column in retained:
+        series = gold[column]
+        before = nulls_before.get(column)
+        if before is None:
+            profile = profiles.get(column)
+            before = int(profile.null_count) if profile is not None else 0
+        readiness.append(
+            ColumnReadiness(
+                column=column,
+                dtype=str(series.dtype),
+                nulls_before=int(before),
+                nulls_after=int(series.isna().sum()),
+                distinct_count=int(series.nunique(dropna=True)),
+                is_target=column == target,
+            )
+        )
+
+    records = {record.operation_id: record for record in result.operation_records}
+    operations: list[AppliedOperation] = []
+    for operation in plan.operations:
+        record = records.get(operation.operation_id)
+        operations.append(
+            AppliedOperation(
+                operation_id=operation.operation_id,
+                operation_type=operation.operation_type,
+                target_columns=operation.target_columns,
+                detail=_operation_detail(operation),
+                rows_before=int(record.rows_before) if record else 0,
+                rows_after=int(record.rows_after) if record else 0,
+            )
+        )
+
+    unresolved = tuple(
+        comparison.explanation
+        for comparison in report.diagnostic_comparisons
+        if comparison.status
+        in {DiagnosticResolution.UNCHANGED, DiagnosticResolution.WORSENED}
+    )
+
+    return DashboardSummary(
+        qa_status=report.status,
+        plan_id=plan.plan_id,
+        qa_report_id=report.qa_report_id,
+        rows_before=report.before_row_count,
+        rows_after=report.after_row_count,
+        columns_before=report.before_column_count,
+        columns_after=report.after_column_count,
+        row_loss_pct=report.row_loss_pct,
+        removed_columns=report.removed_columns,
+        retained_columns=retained,
+        renamed_columns=report.renamed_columns,
+        duplicate_rows_before=report.duplicate_rows_before,
+        duplicate_rows_after=report.duplicate_rows_after,
+        duplicate_keys_before=report.duplicate_keys_before,
+        duplicate_keys_after=report.duplicate_keys_after,
+        nulls_before_total=sum(item.nulls_before for item in readiness),
+        nulls_after_total=sum(item.nulls_after for item in readiness),
+        columns=tuple(readiness),
+        operations=tuple(operations),
+        target_column=target,
+        warnings=_warnings(runtime),
+        unresolved_issues=unresolved,
+    )
+
+
 __all__ = [
     "DASHBOARD_TITLE",
+    "AppliedOperation",
+    "ColumnReadiness",
+    "DashboardSummary",
     "DashboardContext",
     "DashboardFailure",
     "DashboardFailureCode",
     "DashboardHandoff",
     "build_dashboard_handoff",
+    "build_dashboard_summary",
 ]

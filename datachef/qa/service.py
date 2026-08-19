@@ -9,6 +9,7 @@ import pandas as pd
 from datachef.contracts import (
     AcceptedReviewEvidence,
     CastColumnParameters,
+    DropColumnParameters,
     CastTarget,
     DiagnosticIssueComparison,
     DiagnosticIssueKind,
@@ -405,6 +406,133 @@ def _cast_preservation_results(
     return tuple(results)
 
 
+
+def _operation_preservation_results(
+    plan: TransformationPlan,
+    execution: ExecutionResult,
+    replay: OperationRun,
+    source: pd.DataFrame,
+    transformed: pd.DataFrame,
+) -> tuple[InvariantResult, ...]:
+    """Per-operation assertions for the three value-rewriting operations.
+
+    Modelled on _cast_preservation_results: the handler measures, the replay
+    measures again, and the invariant passes only when both agree and the
+    measurement is acceptable. Every one is mandatory and fails closed, so a
+    missing measurement is a failure rather than a pass.
+    """
+
+    records = {record.operation_id: record for record in execution.operation_records}
+    replay_records = {record.operation_id: record for record in replay.operation_records}
+    results: list[InvariantResult] = []
+
+    for operation in plan.operations:
+        record = records.get(operation.operation_id)
+        replay_record = replay_records.get(operation.operation_id)
+        applied = (
+            replay_record is not None
+            and replay_record.status is OperationExecutionStatus.APPLIED
+        )
+        rows_held = (
+            replay_record is not None
+            and replay_record.rows_before == replay_record.rows_after
+        )
+
+        if operation.operation_type is OperationType.IMPUTE_MISSING:
+            changed = replay_record.changed_non_null_count if replay_record else None
+            filled = replay_record.filled_null_count if replay_record else None
+            agrees = (
+                record is not None
+                and replay_record is not None
+                and record.changed_non_null_count == replay_record.changed_non_null_count
+                and record.filled_null_count == replay_record.filled_null_count
+            )
+            passed = bool(
+                applied
+                and rows_held
+                and agrees
+                and changed == 0
+                and filled is not None
+                and filled > 0
+            )
+            results.append(
+                InvariantResult(
+                    invariant_id=f"impute-preservation-{operation.operation_id}",
+                    kind=InvariantKind.IMPUTATION_VALUE_PRESERVATION,
+                    status=InvariantStatus.PASS if passed else InvariantStatus.FAIL,
+                    mandatory=True,
+                    explanation=(
+                        "Imputation may only fill nulls: every already-populated "
+                        "value must be unchanged and the null count must fall."
+                    ),
+                    observed_value=changed if changed is not None else "MISSING",
+                    expected_value=0,
+                )
+            )
+        elif operation.operation_type is OperationType.NORMALIZE_NUMERIC_TEXT:
+            introduced = replay_record.introduced_null_count if replay_record else None
+            agrees = (
+                record is not None
+                and replay_record is not None
+                and record.introduced_null_count == replay_record.introduced_null_count
+            )
+            passed = bool(applied and rows_held and agrees and introduced == 0)
+            results.append(
+                InvariantResult(
+                    invariant_id=f"normalize-no-nulls-{operation.operation_id}",
+                    kind=InvariantKind.NUMERIC_TEXT_NO_NULLS,
+                    status=InvariantStatus.PASS if passed else InvariantStatus.FAIL,
+                    mandatory=True,
+                    explanation=(
+                        "Stripping numeric noise must not turn any value null."
+                    ),
+                    observed_value=introduced if introduced is not None else "MISSING",
+                    expected_value=0,
+                )
+            )
+        elif operation.operation_type is OperationType.DROP_COLUMN:
+            assert isinstance(operation.parameters, DropColumnParameters)
+
+            dropped = tuple(operation.target_columns)
+            # Every column any drop in this plan removes. A per-operation
+            # invariant is handed the whole-plan frames, so a second drop must
+            # not make the first one look like a violation.
+            all_dropped = {
+                column
+                for other in plan.operations
+                if other.operation_type is OperationType.DROP_COLUMN
+                for column in other.target_columns
+            }
+            absent = all(column not in transformed.columns for column in dropped)
+            # Count arithmetic rather than comparing name sets: a RENAME_COLUMN
+            # elsewhere in the plan changes a name without removing a column, and
+            # must not read as a column having vanished.
+            expected_count = len(source.columns) - len(all_dropped)
+            actual_count = len(transformed.columns)
+            held = bool(
+                applied
+                and rows_held
+                and absent
+                and actual_count == expected_count
+            )
+
+            results.append(
+                InvariantResult(
+                    invariant_id=f"drop-structure-{operation.operation_id}",
+                    kind=InvariantKind.DROPPED_COLUMN_STRUCTURE,
+                    status=InvariantStatus.PASS if held else InvariantStatus.FAIL,
+                    mandatory=True,
+                    explanation=(
+                        "Dropping columns must preserve the row count, remove every "
+                        "named dropped column, and preserve the surviving column structure."
+                    ),
+                    observed_value=actual_count,
+                    expected_value=expected_count,
+                )
+            )
+    return tuple(results)
+
+
 def _column_lineage(
     report: DiagnosticReport,
     plan: TransformationPlan,
@@ -590,6 +718,9 @@ def run_quality_assurance(
             intent,
         )
         + _cast_preservation_results(plan, execution, replay)
+        + _operation_preservation_results(
+            plan, execution, replay, source, transformed
+        )
         + ordinary_results
     )
     execution_failures = tuple(

@@ -222,6 +222,20 @@ def _legacy_issue_to_contract(issue: dict[str, object]) -> DiagnosticIssue:
     )
 
 
+def _can_identify_a_row(dataframe: pd.DataFrame, column: str) -> bool:
+    """Reject a key candidate that cannot distinguish one row from another.
+
+    A column holding a single distinct non-null value identifies every row
+    equally, so deduplicating on it would collapse the table. Fails closed: an
+    unmeasurable column is not nominated.
+    """
+
+    try:
+        return int(dataframe[column].nunique(dropna=True)) >= 2
+    except (TypeError, ValueError, KeyError):
+        return False
+
+
 def _candidate_key_sets(
     dataframe: pd.DataFrame,
     selected_key_columns: tuple[str, ...],
@@ -235,14 +249,89 @@ def _candidate_key_sets(
         normalized = str(column).lower()
         if normalized == "id" or normalized.endswith("_id"):
             candidate = (str(column),)
-            if candidate not in candidates:
-                candidates.append(candidate)
+            if candidate in candidates:
+                continue
+            # Narrowing only: an explicitly selected key is still honoured above,
+            # but the name heuristic no longer nominates a constant column.
+            if not _can_identify_a_row(dataframe, str(column)):
+                continue
+            candidates.append(candidate)
     return tuple(candidates)
 
 
 def _safe_issue_id(kind: DiagnosticIssueKind, columns: tuple[str, ...]) -> str:
     material = f"{kind.value}|{'|'.join(columns)}"
     return f"issue-{sha256(material.encode('utf-8')).hexdigest()[:16]}"
+
+
+
+# The plain-numeric test the legacy detector already uses, quoted rather than
+# re-tuned: same pattern, same 0.8 threshold, same 30-value sample. The only
+# difference is that this one asks the question one transformation later.
+_PLAIN_NUMERIC = re.compile(r"-?\d+(\.\d+)?")
+_NUMERIC_TEXT_SAMPLE = 30
+_NUMERIC_TEXT_THRESHOLD = 0.8
+
+
+def _plain_numeric_ratio(values: "pd.Series") -> float:
+    if values.empty:
+        return 0.0
+    matches = sum(
+        bool(_PLAIN_NUMERIC.fullmatch(str(value).strip())) for value in values
+    )
+    return matches / len(values)
+
+
+def _numeric_text_noise_issues(dataframe: pd.DataFrame) -> list[DiagnosticIssue]:
+    """Flag text that becomes plain-numeric once named noise is stripped.
+
+    Deliberately the same rule as CANDIDATE_TYPE_CONVERSION, applied to the
+    stripped value, and deliberately mutually exclusive with it: a column that
+    already passes the test before stripping is a plain cast candidate and is
+    left to the existing detector. Only a column that fails before and passes
+    after is noisy numeric text.
+    """
+
+    from datachef.contracts import NormalizeNumericTextParameters
+    from datachef.transform.operations import _strip_numeric_noise
+
+    parameters = NormalizeNumericTextParameters()
+    found: list[DiagnosticIssue] = []
+    for column in dataframe.columns:
+        series = dataframe[column]
+        if not pd.api.types.is_string_dtype(series.dtype) and series.dtype != object:
+            continue
+        sample = series.dropna().astype(str).head(_NUMERIC_TEXT_SAMPLE)
+        if sample.empty:
+            continue
+        if _plain_numeric_ratio(sample) >= _NUMERIC_TEXT_THRESHOLD:
+            continue  # already a plain cast candidate; not this kind
+        stripped = sample.map(lambda value: _strip_numeric_noise(value, parameters))
+        if _plain_numeric_ratio(stripped) < _NUMERIC_TEXT_THRESHOLD:
+            continue
+        found.append(
+            DiagnosticIssue(
+                issue_id=_safe_issue_id(
+                    DiagnosticIssueKind.CANDIDATE_NUMERIC_TEXT_NOISE,
+                    (str(column),),
+                ),
+                kind=DiagnosticIssueKind.CANDIDATE_NUMERIC_TEXT_NOISE,
+                classification=IssueClassification.CANDIDATE_CONVERSION,
+                title=f"'{column}' is numeric text carrying symbols",
+                severity=Severity.LOW,
+                affected_columns=(str(column),),
+                evidence=(
+                    MetricEvidence(metric="affected_row_count", value=len(sample)),
+                ),
+                suggested_operation=OperationType.NORMALIZE_NUMERIC_TEXT,
+                explanation=(
+                    "Most values become numbers once currency symbols, thousands "
+                    "separators and surrounding whitespace are removed. Normalize "
+                    "the text first, then cast."
+                ),
+            )
+        )
+    return found
 
 
 def diagnose_raw_dataframe(
@@ -262,12 +351,14 @@ def diagnose_raw_dataframe(
             null_count=int(item["nulls"]),
             null_pct=float(item["null_pct"]),
             unique_count=int(item["unique"]),
+            zero_count=int(item["zero_count"]),
             is_primary_key_candidate=bool(item["is_pk_candidate"]),
             possible_pii=bool(item["is_pii"]),
         )
         for item in legacy_report["columns"]
     )
     issues = [_legacy_issue_to_contract(item) for item in legacy_report["issues"]]
+    issues.extend(_numeric_text_noise_issues(dataframe))
     missing_selected_keys = tuple(
         column for column in selected_key_columns if column not in dataframe.columns
     )

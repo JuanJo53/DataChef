@@ -8,7 +8,12 @@ import streamlit as st
 
 from datachef.contracts import OperationType, WorkflowStage
 from ui import state as ui_state
-from ui.screens import build_transformation_requests, render_findings, render_result
+from ui.screens import (
+    build_transformation_requests,
+    render_findings,
+    render_result,
+    render_validation,
+)
 
 
 def _render_operations(plan: Any) -> None:
@@ -22,51 +27,16 @@ def _render_operations(plan: Any) -> None:
         return
     for index, operation in enumerate(plan.operations, start=1):
         columns = ", ".join(operation.target_columns) or "—"
-        with st.expander(
-            f"{index}. {operation.operation_type.value} — {columns} "
-            f"(risk {operation.risk.value})"
-        ):
+        # Risk is read straight off the plan operation and shown as text, never
+        # as colour alone and never inside a collapsed label the reader can miss.
+        st.markdown(
+            f"{index}. **{operation.operation_type.value}** on {columns} — "
+            f"risk **{operation.risk.value}**"
+        )
+        with st.expander(f"Operation {index} detail"):
             st.markdown(f"**Why:** {operation.rationale}")
             st.markdown(f"**Expected effect:** {operation.expected_effect}")
             st.caption(f"Operation `{operation.operation_id}`")
-
-
-def _render_validation(state_evidence: Any, intent: Any) -> None:
-    """Show the validation facts the application already produced.
-
-    This renders evidence only: codes, messages, operation IDs, and numbers.
-    It never recommends a threshold or interprets the outcome.
-    """
-
-    validation = state_evidence.plan_validation
-    if validation is None:
-        return
-    st.markdown("### Validation")
-    left, right = st.columns(2)
-    left.metric(
-        "Estimated cumulative row loss",
-        f"{validation.cumulative_estimated_row_loss_pct:.2f}%",
-    )
-    if intent is not None:
-        right.metric(
-            "Your acceptable row loss",
-            f"{intent.acceptable_row_loss_pct:.2f}%",
-        )
-    if validation.row_loss_estimates:
-        st.markdown("#### Estimated row removal per operation")
-        for estimate in validation.row_loss_estimates:
-            st.markdown(
-                f"- `{estimate.operation_id}` — {estimate.estimated_rows} row(s), "
-                f"{estimate.estimated_pct:.2f}%"
-            )
-    if validation.findings:
-        st.markdown("#### Validation findings")
-        for finding in validation.findings:
-            operation = f" (`{finding.operation_id}`)" if finding.operation_id else ""
-            st.markdown(
-                f"- `{finding.severity.value}` **{finding.code}**{operation} — "
-                f"{finding.message}"
-            )
 
 
 def _rejection_message(state_evidence: Any) -> str:
@@ -103,7 +73,7 @@ def _render_revise_form(controller: Any, state: Any, session: Any) -> None:
     columns = [column.name for column in session.source.identity.column_schema]
     cast_default, dedup_default = _current_request_columns(session)
 
-    with st.expander("Revise your intent and plan again", expanded=True):
+    with st.expander("Revise your objective and plan again", expanded=True):
         st.caption(
             "Revising keeps the uploaded dataset and its diagnosis. It clears the "
             "prepared plan and the recorded command history for this dataset."
@@ -135,7 +105,7 @@ def _render_revise_form(controller: Any, state: Any, session: Any) -> None:
             key=ui_state.REVISE_DEDUP_REQUEST_WIDGET,
         )
         if not st.button(
-            "Revise intent",
+            "Revise objective",
             key=ui_state.REVISE_SUBMIT_WIDGET,
             type="primary",
         ):
@@ -179,7 +149,7 @@ def _render_reviews(state_evidence: Any) -> None:
 
 
 def render(controller: Any, state: Any) -> None:
-    st.header("3 · Review the deterministic plan")
+    st.header("4 · Plan")
     session = controller.session
     if session.intent is None:
         st.info("Describe what you need before a plan can be prepared.")
@@ -211,7 +181,7 @@ def render(controller: Any, state: Any) -> None:
         st.error(_rejection_message(evidence))
         if evidence.transformation_plan is not None:
             _render_operations(evidence.transformation_plan)
-        _render_validation(evidence, session.intent)
+        render_validation(evidence, session.intent)
         _render_reviews(evidence)
         render_findings(session.findings)
         _render_revise_form(controller, state, session)
@@ -220,7 +190,7 @@ def render(controller: Any, state: Any) -> None:
 
     if evidence.transformation_plan is not None:
         _render_operations(evidence.transformation_plan)
-    _render_validation(evidence, session.intent)
+    render_validation(evidence, session.intent)
     _render_reviews(evidence)
     render_findings(session.findings)
     render_result(ui_state.last_result(state))

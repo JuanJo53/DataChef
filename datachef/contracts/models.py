@@ -36,6 +36,9 @@ class OperationType(StrEnum):
     RENAME_COLUMN = "RENAME_COLUMN"
     DROP_DUPLICATE_ROWS = "DROP_DUPLICATE_ROWS"
     DEDUPLICATE_BY_KEYS = "DEDUPLICATE_BY_KEYS"
+    DROP_COLUMN = "DROP_COLUMN"
+    IMPUTE_MISSING = "IMPUTE_MISSING"
+    NORMALIZE_NUMERIC_TEXT = "NORMALIZE_NUMERIC_TEXT"
 
 
 class Severity(StrEnum):
@@ -92,6 +95,10 @@ class DiagnosticIssueKind(StrEnum):
     DUPLICATE_KEYS = "DUPLICATE_KEYS"
     POSSIBLE_PII = "POSSIBLE_PII"
     CANDIDATE_TYPE_CONVERSION = "CANDIDATE_TYPE_CONVERSION"
+    # Numeric text that only fails the plain-numeric test because of noise a
+    # NORMALIZE_NUMERIC_TEXT pass removes. Mutually exclusive with
+    # CANDIDATE_TYPE_CONVERSION: a column already plain-numeric never gets this.
+    CANDIDATE_NUMERIC_TEXT_NOISE = "CANDIDATE_NUMERIC_TEXT_NOISE"
     NULL_KEYS = "NULL_KEYS"
     MISSING_KEY_COLUMN = "MISSING_KEY_COLUMN"
 
@@ -122,6 +129,13 @@ class KeepPolicy(StrEnum):
     LAST = "LAST"
 
 
+class ImputeStrategy(StrEnum):
+    MEAN = "MEAN"
+    MEDIAN = "MEDIAN"
+    MODE = "MODE"
+    CONSTANT = "CONSTANT"
+
+
 class OperationExecutionStatus(StrEnum):
     APPLIED = "APPLIED"
     FAILED = "FAILED"
@@ -135,6 +149,13 @@ class InvariantKind(StrEnum):
     NULL_PCT_MAX = "NULL_PCT_MAX"
     PROTECTED_COLUMN_UNCHANGED = "PROTECTED_COLUMN_UNCHANGED"
     CAST_VALUE_PRESERVATION = "CAST_VALUE_PRESERVATION"
+    # Imputation rewrites cells, so it gets its own assertion: nothing that was
+    # already populated may change, and the null count must actually fall.
+    IMPUTATION_VALUE_PRESERVATION = "IMPUTATION_VALUE_PRESERVATION"
+    # Normalization prepares text for a cast; it may never null a value.
+    NUMERIC_TEXT_NO_NULLS = "NUMERIC_TEXT_NO_NULLS"
+    # A dropped column must take nothing else with it.
+    DROPPED_COLUMN_STRUCTURE = "DROPPED_COLUMN_STRUCTURE"
     PROVENANCE = "PROVENANCE"
 
 
@@ -200,6 +221,7 @@ class ColumnProfile(StrictContract):
     null_count: int = Field(ge=0)
     null_pct: float = Field(ge=0, le=100)
     unique_count: int = Field(ge=0)
+    zero_count: int = Field(ge=0)
     is_primary_key_candidate: bool
     possible_pii: bool
 
@@ -317,6 +339,11 @@ class PlanningQuestion(StrictContract):
     relevant_columns: tuple[str, ...] = Field(default_factory=tuple)
     confidence: float = Field(ge=0, le=1)
 
+class PlanningColumnStatistics(StrictContract):
+    column: str
+    null_count: int = Field(ge=0)
+    zero_count: int = Field(ge=0)
+
 
 class PlanningContext(StrictContract):
     """Local row-free planning state; never serialize this object to a provider."""
@@ -325,11 +352,13 @@ class PlanningContext(StrictContract):
     provider_context_reference: str = Field(min_length=1)
     dataset_identity: DatasetIdentity
     column_schema: tuple[ColumnSchema, ...]
+    null_counts: dict[str, int] = Field(default_factory=dict)
     diagnostic_report: PlanningDiagnosticReport
     user_intent: PlanningIntent
     questions: tuple[PlanningQuestion, ...] = Field(default_factory=tuple)
     supported_operations: tuple[OperationType, ...]
     privacy_manifest: PrivacyManifest
+    column_statistics: tuple[PlanningColumnStatistics, ...] = Field(default_factory=tuple)
 
 
 class ProviderPrivacyManifest(StrictContract):
@@ -363,11 +392,13 @@ class ProviderPlanningPayload(StrictContract):
     row_count: int = Field(ge=0)
     column_count: int = Field(ge=0)
     column_schema: tuple[ColumnSchema, ...]
+    null_counts: dict[str, int] = Field(default_factory=dict)
     diagnostic_report: ProviderDiagnosticReport
     user_intent: ProviderPlanningIntent
     questions: tuple[PlanningQuestion, ...] = Field(default_factory=tuple)
     supported_operations: tuple[OperationType, ...]
     privacy_manifest: ProviderPrivacyManifest
+    column_statistics: tuple[PlanningColumnStatistics, ...] = Field(default_factory=tuple)
 
 
 class TrimWhitespaceParameters(StrictContract):
@@ -406,13 +437,49 @@ class DeduplicateByKeysParameters(StrictContract):
     keep: KeepPolicy
 
 
+class DropColumnParameters(StrictContract):
+    """The columns to drop are the operation's target columns.
+
+    Shaped like TrimWhitespaceParameters, the closest precedent: a multi-column
+    operation with no options carries no fields of its own, so there is exactly
+    one place a column list can live and no way for two lists to disagree.
+    """
+
+    kind: Literal["DROP_COLUMN"] = "DROP_COLUMN"
+
+
+class ImputeMissingParameters(StrictContract):
+    kind: Literal["IMPUTE_MISSING"] = "IMPUTE_MISSING"
+    strategy: ImputeStrategy
+    # Only meaningful for CONSTANT. A closed scalar union, never an expression.
+    constant_value: str | int | float | bool | None = None
+
+
+class NormalizeNumericTextParameters(StrictContract):
+    """Named noise classes only: no caller-supplied regex, no expression.
+
+    Parenthesised negatives are deliberately absent. Nothing in the repository
+    treats "(1,234.00)" as negative, so inventing that reading here could flip a
+    sign silently. Such a value survives normalization, the following cast turns
+    it null, and CAST_VALUE_PRESERVATION fails the run closed.
+    """
+
+    kind: Literal["NORMALIZE_NUMERIC_TEXT"] = "NORMALIZE_NUMERIC_TEXT"
+    strip_whitespace: bool = True
+    strip_currency_symbols: bool = True
+    strip_thousands_separators: bool = True
+
+
 OperationParameters = Annotated[
     TrimWhitespaceParameters
     | NormalizeMissingTokensParameters
     | CastColumnParameters
     | RenameColumnParameters
     | DropDuplicateRowsParameters
-    | DeduplicateByKeysParameters,
+    | DeduplicateByKeysParameters
+    | DropColumnParameters
+    | ImputeMissingParameters
+    | NormalizeNumericTextParameters,
     Field(discriminator="kind"),
 ]
 
@@ -436,6 +503,21 @@ class TransformationOperation(StrictContract):
         if not self.diagnostic_issue_ids and not self.user_requirement_ids:
             raise ValueError("operation must link to an issue or user requirement")
         return self
+
+
+class RequestedOperation(StrictContract):
+    """One typed operation the user explicitly asked for, compiled locally.
+
+    The carrier between the application layer, which compiles a free-form
+    objective into typed requests, and the deterministic planner, which must
+    account for them. It holds no free-form text: an operation type, the target
+    columns, and the same closed parameter union the executor allow-lists.
+    """
+
+    request_id: str = Field(min_length=1)
+    operation_type: OperationType
+    target_columns: tuple[str, ...] = Field(min_length=1)
+    parameters: OperationParameters
 
 
 class TransformationPlan(StrictContract):
@@ -546,6 +628,11 @@ class OperationExecutionRecord(StrictContract):
     rows_after: int = Field(ge=0)
     affected_cell_count: int = Field(ge=0)
     introduced_null_count: int | None = Field(default=None, ge=0)
+    # Imputation changes values, so it is measured rather than trusted: how many
+    # already-populated cells the handler altered (must be zero) and how many
+    # nulls it filled (must be positive). Both are cross-checked against replay.
+    changed_non_null_count: int | None = Field(default=None, ge=0)
+    filled_null_count: int | None = Field(default=None, ge=0)
     error_code: str | None = None
 
 

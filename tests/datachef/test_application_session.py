@@ -28,6 +28,7 @@ from datachef.application.session import (
     record_diagnosis,
     record_intent,
     record_runtime,
+    furthest_screen_for_workflow_stage,
     reset_session,
     screen_for_workflow_stage,
     set_preview,
@@ -153,7 +154,7 @@ def test_new_source_invalidates_all_dataset_bound_evidence() -> None:
 
     assert did_change is True
     assert changed.source is replacement
-    assert changed.screen is ScreenId.DIAGNOSE
+    assert changed.screen is ScreenId.UPLOAD
     assert changed.display_diagnostic_report is None
     assert changed.intent is None
     assert changed.requested_transformations == ()
@@ -213,17 +214,17 @@ def test_semantically_duplicate_requests_are_rejected_even_with_distinct_ids() -
     ("stage", "screen"),
     (
         (WorkflowStage.INITIAL, ScreenId.UPLOAD),
-        (WorkflowStage.DIAGNOSED, ScreenId.INTENT),
+        (WorkflowStage.DIAGNOSED, ScreenId.DIAGNOSE),
         (WorkflowStage.INTENT_CAPTURED, ScreenId.INTENT),
         (WorkflowStage.CONTEXT_READY, ScreenId.PLAN),
         (WorkflowStage.PLANNING, ScreenId.PLAN),
         (WorkflowStage.PLAN_REJECTED, ScreenId.PLAN),
         (WorkflowStage.AWAITING_APPROVAL, ScreenId.APPROVAL),
-        (WorkflowStage.EXECUTING, ScreenId.QA),
-        (WorkflowStage.EXECUTION_FAILED, ScreenId.QA),
+        (WorkflowStage.EXECUTING, ScreenId.RESULTS),
+        (WorkflowStage.EXECUTION_FAILED, ScreenId.RESULTS),
         (WorkflowStage.QA_PASSED, ScreenId.RESULTS),
-        (WorkflowStage.QA_WARNING, ScreenId.QA),
-        (WorkflowStage.QA_FAILED, ScreenId.QA),
+        (WorkflowStage.QA_WARNING, ScreenId.RESULTS),
+        (WorkflowStage.QA_FAILED, ScreenId.RESULTS),
     ),
 )
 def test_every_phase1a_stage_has_an_explicit_presentation_mapping(
@@ -233,9 +234,49 @@ def test_every_phase1a_stage_has_an_explicit_presentation_mapping(
     assert screen_for_workflow_stage(stage) is screen
 
 
+def test_no_stage_routes_the_user_to_a_quality_screen() -> None:
+    """Quality assurance is an internal gate, not a destination.
+
+    Every stage from execution onwards lands on Results, which reports the
+    verdict either way. The enum carries no QA member for a stage to point at.
+    """
+
+    assert not hasattr(ScreenId, "QA")
+    assert {screen_for_workflow_stage(stage) for stage in WorkflowStage} <= set(ScreenId)
+    for stage in (
+        WorkflowStage.EXECUTING,
+        WorkflowStage.EXECUTION_FAILED,
+        WorkflowStage.QA_WARNING,
+        WorkflowStage.QA_FAILED,
+        WorkflowStage.QA_PASSED,
+    ):
+        assert screen_for_workflow_stage(stage) is ScreenId.RESULTS
+
+
+@pytest.mark.parametrize(
+    ("stage", "screen"),
+    (
+        # Only a passing quality gate unlocks the dashboard. Every other stage
+        # unlocks no further than the screen it lands on.
+        (WorkflowStage.QA_PASSED, ScreenId.DASHBOARD),
+        (WorkflowStage.QA_WARNING, ScreenId.RESULTS),
+        (WorkflowStage.QA_FAILED, ScreenId.RESULTS),
+        (WorkflowStage.EXECUTION_FAILED, ScreenId.RESULTS),
+        (WorkflowStage.AWAITING_APPROVAL, ScreenId.APPROVAL),
+        (WorkflowStage.DIAGNOSED, ScreenId.DIAGNOSE),
+        (WorkflowStage.INITIAL, ScreenId.UPLOAD),
+    ),
+)
+def test_only_a_passing_quality_gate_unlocks_the_dashboard(
+    stage: WorkflowStage,
+    screen: ScreenId,
+) -> None:
+    assert furthest_screen_for_workflow_stage(stage) is screen
+
+
 def test_navigation_and_preview_do_not_invalidate_business_evidence() -> None:
     session = _populated_session()
-    navigated = navigate(session, ScreenId.QA)
+    navigated = navigate(session, ScreenId.DASHBOARD)
     previewed = set_preview(navigated, True)
 
     assert navigated.workflow_runtime is session.workflow_runtime

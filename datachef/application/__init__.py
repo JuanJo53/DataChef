@@ -10,11 +10,20 @@ from datachef.application.artifacts import (
     build_artifact_set,
 )
 from datachef.application.dashboard import (
+    AppliedOperation,
+    ColumnReadiness,
+    DashboardSummary,
+    build_dashboard_summary,
     DashboardContext,
     DashboardFailure,
     DashboardFailureCode,
     DashboardHandoff,
     build_dashboard_handoff,
+)
+from datachef.application.pipeline_render import (
+    PIPELINE_MEDIA_TYPE,
+    render_pipeline_bytes,
+    render_pipeline_script,
 )
 from datachef.application.models import (
     ApplicationFinding,
@@ -61,6 +70,10 @@ __all__ = [
     "DashboardFailure",
     "DashboardFailureCode",
     "DashboardHandoff",
+    "DashboardSummary",
+    "AppliedOperation",
+    "ColumnReadiness",
+    "build_dashboard_summary",
     "DataChefController",
     "DownloadArtifact",
     "build_artifact_set",
@@ -69,6 +82,7 @@ __all__ = [
     "JsonRecordsParserOptions",
     "ParsedDataset",
     "ParquetParserOptions",
+    "PIPELINE_MEDIA_TYPE",
     "ParserOptions",
     "RequestedTransformation",
     "ScreenId",
@@ -80,6 +94,8 @@ __all__ = [
     "UploadPolicy",
     "UploadRequest",
     "parse_upload",
+    "render_pipeline_bytes",
+    "render_pipeline_script",
     "source_metadata_for_upload",
     "upload_request_id",
 ]

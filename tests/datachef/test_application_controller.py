@@ -13,6 +13,7 @@ from pandas.testing import assert_frame_equal
 import datachef.application.controller as controller_module
 
 from datachef.application import (
+    ArtifactFailure,
     CsvParserOptions,
     DataChefController,
     JsonRecordsParserOptions,
@@ -1234,6 +1235,60 @@ def test_new_dataset_changed_intent_preview_and_reset_follow_invalidation_rules(
     assert controller.session.screen is ScreenId.UPLOAD
     assert controller.session.source is None
     assert controller.session.uploader_generation == generation + 1
+
+
+def test_navigate_changes_only_the_screen_and_authorizes_nothing() -> None:
+    controller = _loaded_controller()
+    controller.submit_intent(_intent(), ())
+    controller.prepare_plan(command_id="nav-plan")
+    controller.record_human_decision(HumanDecision.APPROVE, command_id="nav-approve")
+    controller.execute_current_plan(command_id="nav-execute")
+    before = controller.session
+    assert before.screen is ScreenId.RESULTS
+
+    result = controller.navigate(ScreenId.PLAN)
+    after = controller.session
+
+    assert result.changed is True
+    assert result.code == "SCREEN_CHANGED"
+    assert after.screen is ScreenId.PLAN
+    assert after.command_history == before.command_history
+    assert after.pending_approval == before.pending_approval
+    assert after.findings == before.findings
+    assert after.intent == before.intent
+    assert after.workflow_runtime.state == before.workflow_runtime.state
+    assert after.source.identity == before.source.identity
+    assert after.uploader_generation == before.uploader_generation
+
+
+def test_navigate_to_the_current_screen_is_an_idempotent_no_change() -> None:
+    controller = _loaded_controller()
+    before = controller.session
+
+    result = controller.navigate(before.screen)
+
+    assert result.changed is False
+    assert result.code == "SCREEN_UNCHANGED"
+    assert controller.session.revision == before.revision
+
+
+def test_navigating_back_does_not_reopen_execution_or_expose_gold() -> None:
+    controller = _loaded_controller()
+    controller.submit_intent(_intent(), ())
+    controller.prepare_plan(command_id="nav-gate-plan")
+    controller.navigate(ScreenId.RESULTS)
+
+    session = controller.session
+    assert session.screen is ScreenId.RESULTS
+    assert session.pending_approval is None
+    assert session.workflow_runtime.state.stage is WorkflowStage.AWAITING_APPROVAL
+    assert session.workflow_runtime.gold_dataframe is None
+    assert isinstance(controller.build_artifacts(), ArtifactFailure)
+    assert controller.build_dashboard_handoff().code.value == "GOLD_UNAVAILABLE"
+    # Execution still requires a recorded approval, whatever screen we are on.
+    assert controller.execute_current_plan(command_id="nav-gate-exec").code == (
+        "APPROVAL_REQUIRED"
+    )
 
 
 def test_controller_import_graph_is_deterministic_and_provider_free() -> None:

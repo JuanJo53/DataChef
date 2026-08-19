@@ -50,6 +50,9 @@ from datachef.application.session import (
 )
 from datachef.application.uploads import parse_upload, source_metadata_for_upload
 from datachef.contracts import (
+    DropColumnParameters,
+    ImputeMissingParameters,
+    RequestedOperation,
     CastColumnParameters,
     CastTarget,
     DeduplicateByKeysParameters,
@@ -543,6 +546,11 @@ class DataChefController:
                 )
             )
         findings = tuple(finding_items)
+        # The objective is prose; the planner may only act on typed requests. It
+        # is compiled here, locally, from the free-form goal and the raw frame,
+        # and only when the caller supplied no typed requests of its own, so an
+        # explicit caller always wins. Nothing compiled here reaches a provider.
+        intent, requests = self._with_compiled_requests(intent, requests)
         previous = self._session
         try:
             self._session = record_intent(
@@ -567,6 +575,115 @@ class DataChefController:
             changed=self._session is not previous,
             code="INTENT_RECORDED",
         )
+
+    def _with_compiled_requests(
+        self,
+        intent: UserIntent,
+        requests: tuple[RequestedTransformation, ...],
+    ) -> tuple[UserIntent, tuple[RequestedTransformation, ...]]:
+        """Merge typed requests from the objective with any the caller supplied.
+
+        Both are real user intent: the checkboxes on the Objective screen and the
+        prose in the goal box. Compiling only when the caller supplied nothing
+        would mean ticking one "cast to numeric" box silently discarded a whole
+        written objective, so the two are merged instead. An explicit request
+        always wins where they overlap, and a compiled drop never removes a
+        column an explicit request is about to work on.
+        """
+
+        source = self._session.source
+        report = self._session.display_diagnostic_report
+        if source is None or report is None or not intent.user_goal.strip():
+            return intent, requests
+        try:
+            from datachef.application.request_compiler import compile_requests
+
+            compiled = compile_requests(intent.user_goal, source.raw_copy(), report)
+        except Exception:
+            # Compilation is a convenience, never a gate. A failure leaves the
+            # session with whatever the caller supplied rather than blocking.
+            return intent, requests
+
+        claimed = {
+            (request.operation_type, tuple(request.target_columns))
+            for request in requests
+        }
+        explicit_columns = {
+            column for request in requests for column in request.target_columns
+        }
+        merged = list(requests)
+        for candidate in compiled:
+            key = (candidate.operation_type, tuple(candidate.target_columns))
+            if key in claimed:
+                continue
+            if candidate.operation_type is OperationType.DROP_COLUMN and (
+                explicit_columns.intersection(candidate.target_columns)
+            ):
+                continue
+            claimed.add(key)
+            merged.append(candidate)
+        return self._with_nominated_keys(intent, tuple(merged)), tuple(merged)
+
+    def _with_nominated_keys(
+        self,
+        intent: UserIntent,
+        requests: tuple[RequestedTransformation, ...],
+    ) -> UserIntent:
+        """Nominate the keys an explicit deduplication request names.
+
+        Asking to "drop the duplicate values based on the asin column" *is* the
+        statement that asin identifies a record, which is exactly what
+        ``selected_key_columns`` means. Recording it there is what lets the
+        deterministic estimator price the request: diagnosis measures duplicate
+        and null-key counts for every nominated key set, and both
+        ``prepare_workflow`` and the authoritative recomputation read the same
+        field, so planning and the execution gate cannot disagree about it.
+
+        This nominates; it does not approve. An unpriceable or destructive key is
+        still refused downstream by the existing row-loss threshold and null-key
+        guards, and a key the estimator cannot measure still leaves the request
+        unplanned and blocking.
+        """
+
+        nominated = tuple(
+            column
+            for request in requests
+            if request.operation_type is OperationType.DEDUPLICATE_BY_KEYS
+            for column in request.target_columns
+        )
+        missing = tuple(
+            column
+            for column in dict.fromkeys(nominated)
+            if column not in intent.selected_key_columns
+        )
+        if not missing:
+            return intent
+        return intent.model_copy(
+            update={"selected_key_columns": intent.selected_key_columns + missing}
+        )
+
+    def _requested_operations(self) -> tuple[RequestedOperation, ...]:
+        return tuple(
+            request.as_requested_operation()
+            for request in self._session.requested_transformations
+        )
+
+    def _build_planner(self):
+        """Build the planner and hand it this session's typed requests."""
+
+        planner = self._planner_factory()
+        requested = self._requested_operations()
+        accept = getattr(planner, "accept_requests", None)
+        if callable(accept):
+            accept(requested)
+        if not requested:
+            return planner
+        # The live planner builds its own plan and would otherwise return it
+        # verbatim, discarding what the user asked for. Wrapping makes the
+        # compiled requests authoritative over any planner's proposal.
+        from datachef.planning.requests import RequestAwarePlanner
+
+        return RequestAwarePlanner(planner, requested)
 
     def revise_intent(
         self,
@@ -636,6 +753,19 @@ class DataChefController:
                     )
                 ):
                     continue
+            elif request.operation_type is OperationType.DROP_COLUMN:
+                if not isinstance(operation.parameters, DropColumnParameters):
+                    continue
+            elif request.operation_type is OperationType.IMPUTE_MISSING:
+                requested_impute = request.parameters
+                if not (
+                    isinstance(requested_impute, ImputeMissingParameters)
+                    and isinstance(operation.parameters, ImputeMissingParameters)
+                    and operation.parameters.strategy is requested_impute.strategy
+                    and operation.parameters.constant_value
+                    == requested_impute.constant_value
+                ):
+                    continue
             elif request.operation_type is OperationType.DEDUPLICATE_BY_KEYS:
                 requested = request.parameters
                 if not (
@@ -688,7 +818,7 @@ class DataChefController:
             runtime = self._prepare_service(
                 source.raw_copy(),
                 intent,
-                self._planner_factory(),
+                self._build_planner(),
                 self._reviewer_factory(),
             )
         except Exception:
@@ -1037,6 +1167,28 @@ class DataChefController:
             self._gold_runtime(),
             intent,
             selected_questions=self._selected_questions(),
+        )
+
+    def build_dashboard_summary(self):
+        """Deterministic run summary for the dashboard, gated on verified gold."""
+
+        from datachef.application.dashboard import build_dashboard_summary
+
+        return build_dashboard_summary(self._gold_runtime(), self._session.intent)
+
+    def navigate(self, screen: ScreenId) -> TransitionResult:
+        """Move presentation to another screen without touching workflow state.
+
+        Navigation authorizes nothing: it does not clear command history, the
+        pending approval, findings, or any workflow evidence. Every gate keys off
+        workflow stage and evidence, never off the screen.
+        """
+
+        previous = self._session
+        self._session = navigate(self._session, screen)
+        return self._transition(
+            changed=self._session is not previous,
+            code="SCREEN_CHANGED" if self._session is not previous else "SCREEN_UNCHANGED",
         )
 
     def set_preview_enabled(self, enabled: bool) -> TransitionResult:

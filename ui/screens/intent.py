@@ -8,7 +8,12 @@ import streamlit as st
 
 from datachef.contracts import DownstreamUse, UserIntent
 from ui import state as ui_state
-from ui.screens import build_transformation_requests, render_findings, render_result
+from ui.screens import (
+    build_transformation_requests,
+    render_diagnosis,
+    render_findings,
+    render_result,
+)
 
 
 def _column_names(session: Any) -> list[str]:
@@ -32,14 +37,19 @@ def _render_suggested_questions(session: Any) -> list[str]:
 
 
 def render(controller: Any, state: Any) -> None:
-    st.header("2 · Describe what you need")
+    st.header("3 · Objective")
     session = controller.session
     if session.source is None or session.display_diagnostic_report is None:
-        st.info("Upload and diagnose a dataset first.")
+        st.info("Upload a dataset and run the diagnosis first.")
         return
+
+    # The diagnosis is produced on the previous stage but the controller lands
+    # the user here, so this is where that evidence has to be readable.
+    render_diagnosis(session)
 
     columns = _column_names(session)
 
+    st.markdown("### What you need from this table")
     goal = st.text_area(
         "What should this table be good for?",
         key=ui_state.GOAL_WIDGET,
@@ -61,15 +71,42 @@ def render(controller: Any, state: Any) -> None:
         step=1.0,
         key=ui_state.ROW_LOSS_WIDGET,
     )
-    key_columns = st.multiselect(
-        "Key columns",
-        columns,
-        key=ui_state.KEY_COLUMNS_WIDGET,
-    )
     required_columns = st.multiselect(
         "Columns that must survive",
         columns,
         key=ui_state.REQUIRED_COLUMNS_WIDGET,
+        help="DataChef refuses any plan that would drop one of these columns.",
+    )
+    key_columns = st.multiselect(
+        "Which column tells you two rows are the same record?",
+        columns,
+        key=ui_state.KEY_COLUMNS_WIDGET,
+        help=(
+            "If two rows share this value, DataChef treats them as duplicates — "
+            "for example order_id or email. Leave empty if you're not sure."
+        ),
+    )
+    st.markdown("### Typed transformation requests")
+    st.caption(
+        "This offline slice executes numeric casts. The planner must account "
+        "for every request you make here."
+    )
+    cast_columns = st.multiselect(
+        "Cast these columns to numeric",
+        columns,
+        key=ui_state.CAST_REQUEST_WIDGET,
+    )
+    # A separate "deduplicate by these keys" control asked the same question as
+    # "which column tells you two rows are the same record?" above, in different
+    # words. The key columns already drive deduplication, so the duplicate input
+    # is gone; the request contract and the submit handler are unchanged.
+
+    # Questions drive the dashboard, not the cleaning plan, so they sit below
+    # every cleaning field in their own section.
+    st.markdown("### Business questions for the dashboard")
+    st.caption(
+        "Optional. These shape the dashboard you get at the end — they do not "
+        "change how your data is cleaned."
     )
     authored = st.text_area(
         "Your analytical questions (one per line)",
@@ -78,26 +115,10 @@ def render(controller: Any, state: Any) -> None:
     )
     selected_question_ids = _render_suggested_questions(session)
 
-    st.markdown("### Typed transformation requests")
-    st.caption(
-        "This offline slice executes numeric casts and key deduplication. The "
-        "planner must account for every request you make here."
-    )
-    cast_columns = st.multiselect(
-        "Cast these columns to numeric",
-        columns,
-        key=ui_state.CAST_REQUEST_WIDGET,
-    )
-    dedup_keys = st.multiselect(
-        "Deduplicate rows by these keys",
-        columns,
-        key=ui_state.DEDUP_REQUEST_WIDGET,
-    )
-
     render_findings(session.findings)
 
     if st.button(
-        "Submit intent",
+        "Save objective and build a plan",
         key=ui_state.SUBMIT_INTENT_WIDGET,
         type="primary",
     ):
@@ -113,7 +134,7 @@ def render(controller: Any, state: Any) -> None:
                     line.strip() for line in (authored or "").splitlines() if line.strip()
                 ),
             )
-            requests = build_transformation_requests(cast_columns, dedup_keys)
+            requests = build_transformation_requests(cast_columns, [])
         except (ValueError, TypeError):
             st.error(
                 "**INVALID_INTENT_REQUEST** — the submitted intent or requests "

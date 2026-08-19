@@ -1,9 +1,16 @@
-"""Results stage: downloads and dashboard, both only as the controller allows.
+"""Results stage: what happened to the data, and the bundle that proves it.
 
-Nothing here decides that a run passed. The bundle exists only if
-``controller.build_artifacts()`` returns one, and the dashboard exists only if
-``controller.build_dashboard_handoff()`` returns one. Any refusal is rendered as
+Nothing here decides that a run passed. The verdict, the numbers, and the
+bundle all come from the controller: the downloads exist only if
+``controller.build_artifacts()`` returns a set, and the summary exists only if
+``controller.build_dashboard_summary()`` returns one. Any refusal is rendered as
 its own sanitized message with no download controls at all.
+
+This is the single screen a run lands on after approval, so it reports a failed
+or withheld run as well as a passing one. Quality assurance did not stop being
+mandatory when it stopped being a screen of its own; it is still the gate that
+decides whether there is any gold here to describe, and its report is read back
+below.
 """
 
 from __future__ import annotations
@@ -12,9 +19,11 @@ from typing import Any
 
 import streamlit as st
 
-from datachef.application import ArtifactSet, DashboardHandoff
+import pandas as pd
+
+from datachef.application import ArtifactSet, DashboardSummary, ScreenId
+from datachef.contracts import WorkflowStage
 from ui import state as ui_state
-from ui.charts import render_charts
 from ui.screens import render_failure, render_findings, render_result
 
 
@@ -24,7 +33,33 @@ _DOWNLOAD_LABELS = {
     "TRANSFORMATION_PLAN_JSON": "Download transformation plan",
     "QA_REPORT_JSON": "Download QA report",
     "EXECUTION_CHANGE_LOG_JSON": "Download execution change log",
+    "PIPELINE_SCRIPT_PY": "Download reusable pipeline script",
     "MANIFEST_JSON": "Download manifest",
+}
+
+# Read on the screen the run now lands on. Quality assurance still ran, and a
+# stage that is not QA_PASSED still means gold, downloads, and the dashboard
+# stay closed; the difference is only that the news is delivered here.
+_STAGE_MESSAGES = {
+    WorkflowStage.EXECUTING: (
+        "The approved plan is still running.",
+        "info",
+    ),
+    WorkflowStage.EXECUTION_FAILED: (
+        "The approved plan did not finish. No gold table was produced, so "
+        "downloads and the dashboard stay closed.",
+        "error",
+    ),
+    WorkflowStage.QA_WARNING: (
+        "Quality assurance returned a warning. Gold was withheld, so downloads "
+        "and the dashboard stay closed.",
+        "warning",
+    ),
+    WorkflowStage.QA_FAILED: (
+        "Quality assurance failed. Gold was withheld, so downloads and the "
+        "dashboard stay closed.",
+        "error",
+    ),
 }
 
 
@@ -32,7 +67,7 @@ def _render_downloads(bundle: ArtifactSet) -> None:
     st.markdown("### Download the verified bundle")
     st.caption(
         "Every file is served exactly as the application produced it. The "
-        "manifest records a SHA-256 for each of the other five artifacts."
+        "manifest records a SHA-256 for each of the other six artifacts."
     )
     for artifact in bundle.artifacts():
         kind = artifact.kind.value
@@ -51,32 +86,202 @@ def _render_downloads(bundle: ArtifactSet) -> None:
         )
 
 
-def _render_dashboard(handoff: DashboardHandoff, preview_enabled: bool) -> None:
-    context = handoff.context
-    st.markdown("### Dashboard")
-    st.caption(
-        f"Handoff `{context.handoff_id[:24]}…` · plan `{context.plan_id}` · "
-        f"QA `{context.qa_report_id}`"
+def _render_readiness(summary: DashboardSummary) -> None:
+    """Top band: did it work, how much moved, is it ready to model.
+
+    Every number is read off the deterministic summary. Nothing is recomputed
+    here, so the screen cannot disagree with the QA report it is describing.
+    """
+
+    st.markdown("### Data readiness")
+    if summary.modelling_ready:
+        st.success(summary.readiness_headline)
+    else:
+        st.warning(summary.readiness_headline)
+
+    rows, columns, missing, duplicates = st.columns(4)
+    rows.metric(
+        "Rows",
+        f"{summary.rows_after:,}",
+        delta=f"-{summary.rows_removed:,}" if summary.rows_removed else "unchanged",
+        delta_color="off",
     )
-    for warning in context.warnings:
-        st.warning(warning)
-    frame = handoff.gold_frame()
-    render_charts({"spec": handoff.dashboard_spec(), "data": frame})
-    if context.authored_questions or context.selected_questions:
-        st.markdown("#### Questions carried into this view")
-        for question in context.authored_questions:
-            st.markdown(f"- {question}")
-        for suggested in context.selected_questions:
-            st.markdown(f"- {suggested.question}")
-    if preview_enabled:
-        st.markdown("#### Local gold preview")
-        st.caption("Presentation only; never part of evidence or the manifest.")
-        st.dataframe(frame.head(10), use_container_width=True)
+    columns.metric(
+        "Columns",
+        f"{summary.columns_after:,}",
+        delta=(
+            f"-{len(summary.removed_columns)}"
+            if summary.removed_columns
+            else "unchanged"
+        ),
+        delta_color="off",
+    )
+    missing.metric(
+        "Missing values",
+        f"{summary.nulls_after_total:,}",
+        delta=f"-{summary.nulls_filled:,}" if summary.nulls_filled else "unchanged",
+        delta_color="off",
+    )
+    duplicates.metric(
+        "Duplicate rows",
+        f"{summary.duplicate_rows_after:,}",
+        delta=(
+            f"-{summary.duplicate_rows_before - summary.duplicate_rows_after:,}"
+            if summary.duplicate_rows_before > summary.duplicate_rows_after
+            else "unchanged"
+        ),
+        delta_color="off",
+    )
+
+    if summary.target_column is None:
+        st.caption(
+            "No target column was named in the objective, so modelling readiness "
+            "is reported for the table as a whole."
+        )
+    elif summary.target_is_usable:
+        st.caption(
+            f"Target `{summary.target_column}` survived the plan and carries no "
+            "missing values."
+        )
+    else:
+        st.caption(
+            f"Target `{summary.target_column}` is not usable yet: it was removed "
+            "or still carries missing values."
+        )
+
+
+def _render_change_detail(summary: DashboardSummary) -> None:
+    """Middle band: what happened to each column, and which operations did it."""
+
+    st.markdown("### What changed")
+    missingness = pd.DataFrame(
+        [
+            {
+                "column": item.column,
+                "dtype": item.dtype,
+                "missing before": item.nulls_before,
+                "missing after": item.nulls_after,
+                "distinct": item.distinct_count,
+                "target": "yes" if item.is_target else "",
+            }
+            for item in summary.columns
+        ]
+    )
+    st.caption("Missing values per surviving column, before and after the plan.")
+    st.dataframe(missingness, use_container_width=True, hide_index=True)
+
+    if summary.operations:
+        st.caption("Operations the human approved, in the order they ran.")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "operation": item.operation_type.value,
+                        "columns": ", ".join(item.target_columns) or "whole row",
+                        "detail": item.detail,
+                        "rows": f"{item.rows_before} -> {item.rows_after}",
+                    }
+                    for item in summary.operations
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown("**Removed columns**")
+        if summary.removed_columns:
+            for column in summary.removed_columns:
+                st.markdown(f"- `{column}`")
+        else:
+            st.caption("None; every column survived.")
+    with right:
+        st.markdown("**Rows and duplicates**")
+        st.markdown(
+            f"- Rows {summary.rows_before:,} to {summary.rows_after:,} "
+            f"({summary.row_loss_pct:.2f}% removed)"
+        )
+        st.markdown(
+            f"- Duplicate rows {summary.duplicate_rows_before:,} to "
+            f"{summary.duplicate_rows_after:,}"
+        )
+        if summary.duplicate_keys_before is not None:
+            st.markdown(
+                f"- Duplicate keys {summary.duplicate_keys_before:,} to "
+                f"{summary.duplicate_keys_after:,}"
+            )
+
+    for message in summary.unresolved_issues:
+        st.warning(message)
+
+
+def _render_summary(summary: DashboardSummary) -> None:
+    _render_readiness(summary)
+    _render_change_detail(summary)
+
+
+def _render_quality_report(report: Any) -> None:
+    st.markdown("### Quality report")
+    first, second, third, fourth = st.columns(4)
+    first.metric("Rows before", report.before_row_count)
+    second.metric("Rows after", report.after_row_count)
+    third.metric("Columns after", report.after_column_count)
+    fourth.metric("Row loss", f"{report.row_loss_pct:.2f}%")
+    st.caption(f"Report `{report.qa_report_id}` · status **{report.status.value}**")
+
+    failing = [item for item in report.invariant_results if item.status.value != "PASS"]
+    if failing:
+        st.markdown("#### Invariants that did not pass")
+        for invariant in failing:
+            st.markdown(
+                f"- `{invariant.status.value}` **{invariant.kind.value}** — "
+                f"{invariant.explanation}"
+            )
+    if report.execution_failures:
+        st.markdown("#### Recorded operation failures")
+        for code in report.execution_failures:
+            st.markdown(f"- `{code}`")
+
+
+def _render_verification(evidence: Any) -> None:
+    """The internal gate's own evidence: what ran, and what quality said."""
+
+    if evidence.stage is not WorkflowStage.QA_PASSED:
+        message, level = _STAGE_MESSAGES.get(
+            evidence.stage,
+            ("This run has not been executed yet.", "info"),
+        )
+        getattr(st, level)(message)
+        if evidence.last_error_code:
+            st.caption(f"Reported code: `{evidence.last_error_code}`")
+
+    if evidence.execution_result is not None:
+        result = evidence.execution_result
+        st.markdown("### Execution")
+        st.caption(
+            f"`{result.execution_id}` · success **{result.success}** · "
+            f"{len(result.operation_records)} operation record(s)"
+        )
+        for record in result.operation_records:
+            st.markdown(
+                f"- `{record.status.value}` **{record.operation_id}** — "
+                f"{record.rows_before} → {record.rows_after} rows"
+            )
+
+    if evidence.qa_report is not None:
+        _render_quality_report(evidence.qa_report)
 
 
 def render(controller: Any, state: Any) -> None:
-    st.header("6 · Verified results")
+    st.header("6 · Results")
     session = controller.session
+
+    if session.workflow_runtime is None:
+        st.info("Run an approved plan first.")
+        render_findings(session.findings)
+        render_result(ui_state.last_result(state))
+        return
 
     bundle = controller.build_artifacts()
     if isinstance(bundle, ArtifactSet):
@@ -88,11 +293,24 @@ def render(controller: Any, state: Any) -> None:
     else:
         render_failure(bundle)
 
-    handoff = controller.build_dashboard_handoff()
-    if isinstance(handoff, DashboardHandoff):
-        _render_dashboard(handoff, session.preview_enabled)
-    else:
-        render_failure(handoff)
+    summary = controller.build_dashboard_summary()
+    if isinstance(summary, DashboardSummary):
+        _render_summary(summary)
+
+    _render_verification(session.workflow_runtime.state)
+
+    # Offered only alongside a real bundle, which exists only for a run whose
+    # quality assurance passed. The dashboard screen re-derives that gate for
+    # itself, so this button is a shortcut, never a grant.
+    if isinstance(bundle, ArtifactSet):
+        st.markdown("---")
+        if st.button(
+            "Open the dashboard",
+            key=ui_state.CONTINUE_TO_DASHBOARD_WIDGET,
+            type="primary",
+        ):
+            controller.navigate(ScreenId.DASHBOARD)
+            st.rerun()
 
     render_findings(session.findings)
     render_result(ui_state.last_result(state))

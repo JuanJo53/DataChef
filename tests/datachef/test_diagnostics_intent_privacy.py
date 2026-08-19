@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pandas as pd
 from pandas.testing import assert_frame_equal
 
 from datachef.contracts import DiagnosticIssueKind, QuestionKind, UserIntent
@@ -19,6 +20,56 @@ def test_raw_diagnosis_does_not_mutate_source(raw_dataframe) -> None:
     assert_frame_equal(raw_dataframe, before)
     assert report.dataset_identity.row_count == 4
     assert report.dataset_identity.fingerprint
+
+
+def test_constant_id_column_is_not_nominated_as_a_deduplication_key() -> None:
+    """A column with one distinct value cannot identify a row (finding 15)."""
+
+    frame = pd.DataFrame(
+        {
+            "asin": ["A1", "A2", "A3", "A1"],
+            "category_id": [104, 104, 104, 104],
+            "amount": [10, 20, 30, 10],
+        }
+    )
+
+    report = diagnose_raw_dataframe(frame)
+
+    assert report.key_duplicate_metrics == ()
+    assert not [
+        issue
+        for issue in report.issues
+        if issue.kind is DiagnosticIssueKind.DUPLICATE_KEYS
+    ]
+
+
+def test_a_genuine_id_column_is_still_nominated_as_a_deduplication_key() -> None:
+    frame = pd.DataFrame({"order_id": [1, 2, 3, 3], "region": ["N", "S", "N", "N"]})
+
+    report = diagnose_raw_dataframe(frame)
+
+    metrics = {
+        item.key_columns: item.duplicate_row_count
+        for item in report.key_duplicate_metrics
+    }
+    assert metrics == {("order_id",): 1}
+    assert any(
+        issue.kind is DiagnosticIssueKind.DUPLICATE_KEYS
+        and issue.affected_columns == ("order_id",)
+        for issue in report.issues
+    )
+
+
+def test_an_explicitly_selected_key_is_honoured_even_when_constant() -> None:
+    """The guard narrows the name heuristic only; a human choice still counts."""
+
+    frame = pd.DataFrame({"category_id": [104, 104, 104], "amount": [1, 2, 3]})
+
+    report = diagnose_raw_dataframe(frame, selected_key_columns=("category_id",))
+
+    assert [item.key_columns for item in report.key_duplicate_metrics] == [
+        ("category_id",)
+    ]
 
 
 def test_duplicate_key_values_are_diagnosed(raw_dataframe) -> None:

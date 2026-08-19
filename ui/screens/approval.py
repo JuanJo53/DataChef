@@ -6,12 +6,43 @@ from typing import Any
 
 import streamlit as st
 
-from datachef.contracts import HumanDecision
+from datachef.contracts import DiagnosticIssueKind, HumanDecision
 from ui import state as ui_state
-from ui.screens import has_blocking, render_findings, render_result
+from ui.screens import (
+    has_blocking,
+    render_findings,
+    render_result,
+    render_validation,
+)
 
 
-def _render_plan_summary(evidence: Any) -> None:
+# The offline slice executes exactly these two operation families, so any other
+# diagnostic finding has no executable operation behind it.
+_EXECUTABLE_ISSUE_KINDS = frozenset(
+    {
+        DiagnosticIssueKind.CANDIDATE_TYPE_CONVERSION,
+        DiagnosticIssueKind.DUPLICATE_KEYS,
+    }
+)
+
+
+def _unaddressable_kinds(report: Any) -> tuple[str, ...]:
+    """Name the reported finding kinds this offline slice cannot act on."""
+
+    if report is None:
+        return ()
+    return tuple(
+        sorted(
+            {
+                issue.kind.value
+                for issue in report.issues
+                if issue.kind not in _EXECUTABLE_ISSUE_KINDS
+            }
+        )
+    )
+
+
+def _render_plan_summary(evidence: Any, report: Any) -> None:
     plan = evidence.transformation_plan
     if plan is None:
         return
@@ -19,11 +50,20 @@ def _render_plan_summary(evidence: Any) -> None:
     st.caption(f"`{plan.plan_id}` · version {plan.version} — {plan.summary}")
     if not plan.operations:
         st.info("The reviewed plan is empty; execution will copy the table unchanged.")
+        unaddressable = _unaddressable_kinds(report)
+        if unaddressable:
+            st.caption(
+                "The diagnosis reported "
+                + ", ".join(unaddressable)
+                + ". This offline slice has no executable operation for those, so "
+                "the plan leaves them as they are."
+            )
     for index, operation in enumerate(plan.operations, start=1):
         columns = ", ".join(operation.target_columns) or "—"
+        # Risk is read straight off the plan operation and shown as text.
         st.markdown(
-            f"{index}. **{operation.operation_type.value}** on {columns} "
-            f"— {operation.expected_effect}"
+            f"{index}. **{operation.operation_type.value}** on {columns} — "
+            f"risk **{operation.risk.value}** — {operation.expected_effect}"
         )
     accepted = evidence.accepted_review
     if accepted is not None:
@@ -31,6 +71,96 @@ def _render_plan_summary(evidence: Any) -> None:
             f"Reviewer accepted attempt {accepted.attempt} for plan "
             f"`{accepted.plan_id}` v{accepted.plan_version}."
         )
+
+
+# Agent prose is untrusted display text. Streamlit escapes HTML on its own (we
+# never pass unsafe_allow_html), and escaping the Markdown control characters too
+# means a reported request renders as the sentence it is, not as formatting.
+_MARKDOWN_CONTROL = frozenset("\\`*_{}[]()#+-.!|<>~")
+
+
+def _plain(text: str) -> str:
+    """Render agent-supplied text as literal characters, never as markup."""
+
+    return "".join(
+        "\\" + character if character in _MARKDOWN_CONTROL else character
+        for character in text
+    )
+
+
+def _render_unsupported_requests(state: Any) -> None:
+    """State what the objective asked for that the allow-list cannot express.
+
+    Neutral scope, not a warning: nothing here is wrong, and nothing here
+    changes the plan, the validation, or the approval gate.
+    """
+
+    registry = ui_state.agent_registry(state)
+    requests = tuple(getattr(registry, "unsupported_requests", ()) or ())
+    if not requests:
+        return
+    st.markdown("### Not in this plan")
+    for description in requests:
+        # The agent may or may not end its sentence; the statement reads the
+        # same either way rather than running two sentences together.
+        subject = _plain(description.rstrip().rstrip(".").strip())
+        st.markdown(
+            f"The objective also asked for {subject}. The offline allow-list "
+            "has no executable operation for it, so it is not in this plan."
+        )
+
+
+def _render_agent_trace(state: Any) -> None:
+    """Show what the planning crew did. Presentation only; decides nothing."""
+
+    registry = ui_state.agent_registry(state)
+    trace = getattr(registry, "trace", None) if registry else None
+    if trace is None:
+        st.caption("Planner: **deterministic** (rule-based, offline).")
+        return
+
+    fallback = trace.fallback_reason_code
+    if fallback is None:
+        st.caption("Planner: **AI planner** (CrewAI crew, inside the allow-list).")
+    else:
+        st.caption(
+            f"Planner: **deterministic** — the AI planner was not used "
+            f"(`{fallback.value}`)."
+        )
+
+    if not trace.attempts:
+        return
+    with st.expander("How this plan was produced"):
+        for attempt in trace.attempts:
+            st.markdown(
+                f"**Attempt {attempt.attempt}** · {attempt.agent} · "
+                f"`{attempt.outcome_code.value}` · {attempt.elapsed_ms:.0f} ms"
+            )
+            for notice in attempt.notices:
+                st.caption(f"Notice: `{notice.value}`")
+            if attempt.tool_invocations:
+                sequence = " → ".join(
+                    item.tool_name for item in attempt.tool_invocations
+                )
+                st.markdown(f"Tool sequence: {sequence}")
+                for item in attempt.tool_invocations:
+                    detail = f"- `{item.tool_name}`"
+                    if item.target_columns:
+                        detail += f" on {', '.join(item.target_columns)}"
+                    if not item.accepted and item.reason_code:
+                        detail += f" — refused `{item.reason_code}`"
+                    if item.estimated_row_loss_pct is not None:
+                        codes = ", ".join(item.critic_finding_codes) or "no findings"
+                        detail += (
+                            f" — critic replied {item.estimated_row_loss_pct:.2f}% "
+                            f"row loss, {codes}"
+                        )
+                    st.markdown(detail)
+            if attempt.validation_codes:
+                st.markdown(
+                    "Validation codes: "
+                    + ", ".join(f"`{code}`" for code in attempt.validation_codes)
+                )
 
 
 def _render_approval_record(approval: Any) -> None:
@@ -42,21 +172,26 @@ def _render_approval_record(approval: Any) -> None:
 
 
 def render(controller: Any, state: Any) -> None:
-    st.header("4 · Approve and run")
+    st.header("5 · Approve")
     session = controller.session
     runtime = session.workflow_runtime
     if runtime is None:
         st.info("Prepare a plan first.")
         return
 
-    _render_plan_summary(runtime.state)
+    _render_plan_summary(runtime.state, session.display_diagnostic_report)
+    _render_unsupported_requests(state)
+    # Informed, exact approval: the human sees what this plan is estimated to
+    # remove, beside the threshold they set, before they consent.
+    render_validation(runtime.state, session.intent)
+    _render_agent_trace(state)
     render_findings(session.findings)
 
     blocking = has_blocking(session.findings)
     if blocking:
         st.error(
             "Approval is disabled while a blocking finding is open. Revise your "
-            "intent or requests to clear it."
+            "objective or requests to clear it."
         )
 
     if session.pending_approval is None:

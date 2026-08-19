@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from datachef.contracts import (
+    NormalizeNumericTextParameters,
+    RequestedOperation,
     CastColumnParameters,
     CastErrorPolicy,
     CastTarget,
@@ -88,9 +90,28 @@ class SequenceReviewer:
 
 @dataclass
 class RuleBasedPlanner:
-    """Offline fallback that proposes only diagnosis-grounded MVP operations."""
+    """Offline planner: diagnosis-grounded operations plus explicit user requests.
+
+    Two grounds for proposing an operation, and no others. A diagnostic issue is
+    evidence the table has a defect. A ``RequestedOperation`` is evidence the
+    user asked for something specific, compiled locally from their objective by
+    ``datachef.application.request_compiler``; it cites the request rather than
+    an issue, which is what ``user_requirement_ids`` exists for.
+
+    Requested drops are emitted last so that a column another operation needs is
+    still present when that operation runs.
+    """
 
     calls: int = 0
+    requested_operations: tuple[RequestedOperation, ...] = ()
+
+    def accept_requests(
+        self,
+        requested_operations: tuple[RequestedOperation, ...],
+    ) -> None:
+        """Hand the planner the typed requests compiled for this session."""
+
+        self.requested_operations = tuple(requested_operations)
 
     def propose(self, context: PlanningContext, *, attempt: int) -> TransformationPlan:
         del attempt
@@ -115,6 +136,40 @@ class RuleBasedPlanner:
                         requires_human_approval=True,
                     )
                 )
+            elif issue.kind is DiagnosticIssueKind.CANDIDATE_NUMERIC_TEXT_NOISE:
+                # Two operations in order, citing one issue: the column is
+                # numeric text carrying symbols, which justifies both stripping
+                # the symbols and the cast that becomes possible afterwards.
+                column = issue.affected_columns[0]
+                operations.append(
+                    TransformationOperation(
+                        operation_id=f"op-normalize-{column}",
+                        operation_type=OperationType.NORMALIZE_NUMERIC_TEXT,
+                        target_columns=(column,),
+                        parameters=NormalizeNumericTextParameters(),
+                        diagnostic_issue_ids=(issue.issue_id,),
+                        rationale="The deterministic profile found numeric text carrying symbols.",
+                        expected_effect="Strip currency symbols, thousands separators and surrounding whitespace.",
+                        risk=RiskLevel.LOW,
+                        requires_human_approval=True,
+                    )
+                )
+                operations.append(
+                    TransformationOperation(
+                        operation_id=f"op-cast-{column}",
+                        operation_type=OperationType.CAST_COLUMN,
+                        target_columns=(column,),
+                        parameters=CastColumnParameters(
+                            target_type=CastTarget.NUMERIC,
+                            errors=CastErrorPolicy.COERCE,
+                        ),
+                        diagnostic_issue_ids=(issue.issue_id,),
+                        rationale="The normalized text is now parseable as a number.",
+                        expected_effect="Convert the stripped numeric text to a numeric dtype.",
+                        risk=RiskLevel.MEDIUM,
+                        requires_human_approval=True,
+                    )
+                )
             elif issue.kind is DiagnosticIssueKind.DUPLICATE_KEYS:
                 operations.append(
                     TransformationOperation(
@@ -132,12 +187,21 @@ class RuleBasedPlanner:
                         requires_human_approval=True,
                     )
                 )
-        return create_transformation_plan(
+        # Requests are enforced by one shared, idempotent layer so the
+        # deterministic planner and the live planner cannot drift apart.
+        from datachef.planning.requests import enforce_requested_operations
+
+        diagnosis_plan = create_transformation_plan(
             dataset_id=context.dataset_identity.dataset_id,
             dataset_fingerprint=context.dataset_identity.fingerprint,
             version=1,
             operations=tuple(operations),
             summary="Offline diagnosis-grounded transformation plan.",
+        )
+        return enforce_requested_operations(
+            diagnosis_plan,
+            self.requested_operations,
+            context,
         )
 
 
