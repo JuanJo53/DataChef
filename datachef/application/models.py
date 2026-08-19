@@ -287,13 +287,21 @@ class ApplicationFinding(StrictApplicationModel):
 
 
 class ScreenId(StrEnum):
+    """The screens a person can be looking at, in the order they meet them.
+
+    Presentation only, and deliberately not a mirror of ``WorkflowStage``.
+    Quality assurance stayed mandatory inside the workflow but stopped being
+    somewhere the user is sent: ``Results`` is the one screen after approval,
+    and it reports a passing and a failing run alike.
+    """
+
     UPLOAD = "UPLOAD"
     DIAGNOSE = "DIAGNOSE"
     INTENT = "INTENT"
     PLAN = "PLAN"
     APPROVAL = "APPROVAL"
-    QA = "QA"
     RESULTS = "RESULTS"
+    DASHBOARD = "DASHBOARD"
 
 
 class CommandKind(StrEnum):

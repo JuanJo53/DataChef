@@ -331,6 +331,8 @@ def test_the_results_screen_renders_the_readiness_dashboard() -> None:
     at.run()
     widget(at, "button", ui_state.DIAGNOSE_WIDGET).click()
     at.run()
+    widget(at, "button", ui_state.CONTINUE_TO_INTENT_WIDGET).click()
+    at.run()
     widget(at, "text_area", ui_state.GOAL_WIDGET).set_value(ML_OBJECTIVE)
     widget(at, "multiselect", ui_state.KEY_COLUMNS_WIDGET).set_value(["asin"])
     widget(at, "slider", ui_state.ROW_LOSS_WIDGET).set_value(50.0)

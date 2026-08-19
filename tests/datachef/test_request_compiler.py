@@ -569,6 +569,8 @@ def _drive_ui(*, cast_columns: list[str] | None = None):
     at.run()
     widget(at, "button", ui_state.DIAGNOSE_WIDGET).click()
     at.run()
+    widget(at, "button", ui_state.CONTINUE_TO_INTENT_WIDGET).click()
+    at.run()
     widget(at, "text_area", ui_state.GOAL_WIDGET).set_value(ML_OBJECTIVE)
     widget(at, "multiselect", ui_state.KEY_COLUMNS_WIDGET).set_value(["asin"])
     widget(at, "slider", ui_state.ROW_LOSS_WIDGET).set_value(50.0)
@@ -1116,3 +1118,371 @@ def test_a_planner_only_operation_still_runs_before_the_requested_ones() -> None
     again = enforce_requested_operations(plan, requested, context)
     assert _sequence(again) == EXPECTED_SEQUENCE
     assert again.operations == plan.operations
+
+
+# ---------------------------------------------------------------------------
+# The second real smoke test: two blockers the earlier fixtures hid.
+#
+# 1. The user never touched the key-columns control, so selected_key_columns was
+#    empty, so diagnosis nominated no key set, so the estimator could not price
+#    the requested asin deduplication and it stayed blocked as
+#    REQUEST_NOT_PLANNED. Asking to deduplicate on a column *is* the statement
+#    that the column identifies a record, so the request now nominates it.
+#
+# 2. The objective says "boughtLastMonth" while the column is
+#    "boughtInLastMonth". The reference never resolved, no request was compiled,
+#    and the live crew's arbitrary CONSTANT imputation filled the gap because
+#    there was nothing to override it.
+#
+# The earlier fixtures masked both: they passed selected_key_columns=("asin",)
+# and silently corrected the column name.
+# ---------------------------------------------------------------------------
+
+# The objective exactly as typed, including the near-miss column reference.
+VERBATIM_OBJECTIVE = (
+    "Prepare this table for ML modelling, the objective is to use this table to "
+    "train a model to predict the price column based on the other columns. For "
+    "the missing values, check if the missing values in the column title is over "
+    "40% and there's no mode drop it, otherwise if the mode exists for the column "
+    "title use it to impute all null values, impute the missing values of the "
+    "column stars using the mean, and impute the column price using the median, "
+    "drop the category_id column, check the distribution in boughtLastMonth if "
+    "it has over 40% of null and 0s as values drop the column. finally drop the "
+    "duplicate values based on the asin column"
+)
+
+VERBATIM_EXPECTED = (
+    (OperationType.IMPUTE_MISSING, ("title",), ImputeStrategy.MODE),
+    (OperationType.IMPUTE_MISSING, ("stars",), ImputeStrategy.MEAN),
+    (OperationType.IMPUTE_MISSING, ("price",), ImputeStrategy.MEDIAN),
+    (OperationType.DROP_COLUMN, ("category_id",), None),
+    (OperationType.DROP_COLUMN, ("boughtInLastMonth",), None),
+    (OperationType.DEDUPLICATE_BY_KEYS, ("asin",), None),
+)
+
+
+def _no_key_controller(
+    objective: str = VERBATIM_OBJECTIVE,
+    *,
+    csv: bytes = MODE_CSV,
+    planner_factory=None,
+    row_loss: float = 50.0,
+) -> DataChefController:
+    """A session where the user typed only the objective, as in the real app."""
+
+    kwargs = {"planner_factory": planner_factory} if planner_factory else {}
+    controller = DataChefController(**kwargs)
+    controller.load_upload(
+        UploadRequest(
+            content=csv,
+            declared_suffix=".csv",
+            format=UploadFormat.CSV,
+            parser_options=CsvParserOptions(encoding="utf-8-sig"),
+        )
+    )
+    controller.diagnose()
+    controller.submit_intent(
+        UserIntent(
+            intent_id="intent-verbatim",
+            user_goal=objective,
+            selected_key_columns=(),  # untouched, exactly as in the smoke test
+            acceptable_row_loss_pct=row_loss,
+        ),
+        (),
+    )
+    controller.prepare_plan(command_id="plan")
+    return controller
+
+
+# ---------------------------------------------------------------------------
+# Explicit deduplication on a key the name heuristic never nominates
+# ---------------------------------------------------------------------------
+
+
+def test_an_explicit_dedup_request_nominates_its_key() -> None:
+    """asin is not id-shaped, so only the explicit request can nominate it."""
+
+    controller = _no_key_controller()
+
+    assert controller.session.intent.selected_key_columns == ("asin",)
+
+
+def test_the_nominated_key_is_measured_by_diagnosis() -> None:
+    controller = _no_key_controller()
+    report = controller.session.workflow_runtime.state.diagnostic_report
+
+    metrics = {
+        tuple(metric.key_columns): metric for metric in report.key_duplicate_metrics
+    }
+    assert ("asin",) in metrics
+    assert metrics[("asin",)].duplicate_row_count == 1
+    assert metrics[("asin",)].null_key_row_count == 0
+
+
+def test_the_requested_dedup_is_planned_and_priced() -> None:
+    """The reported blocker: REQUEST_NOT_PLANNED for asin must be gone."""
+
+    controller = _no_key_controller()
+    state = controller.session.workflow_runtime.state
+
+    dedup = [
+        operation
+        for operation in state.transformation_plan.operations
+        if operation.operation_type is OperationType.DEDUPLICATE_BY_KEYS
+    ]
+    assert [operation.target_columns for operation in dedup] == [("asin",)]
+    # Grounded in real evidence: once the key is nominated the diagnosis raises a
+    # genuine DUPLICATE_KEYS issue, so the deterministic planner's own operation
+    # satisfies the request and cites that issue. Where no such operation exists
+    # the request itself is the grounding, via user_requirement_ids.
+    assert dedup[0].diagnostic_issue_ids or dedup[0].user_requirement_ids
+
+    estimates = {
+        estimate.operation_id: estimate
+        for estimate in state.plan_validation.row_loss_estimates
+    }
+    priced = estimates[dedup[0].operation_id]
+    assert priced.estimated_rows == 1
+    assert priced.estimated_pct == pytest.approx(20.0)
+
+    assert [
+        finding.code for finding in controller.session.findings if finding.blocking
+    ] == []
+
+
+def test_an_unselected_key_without_the_request_is_still_not_nominated() -> None:
+    """Nomination follows the request; it is not a blanket relaxation."""
+
+    controller = _no_key_controller("drop the category_id column")
+
+    assert controller.session.intent.selected_key_columns == ()
+    report = controller.session.workflow_runtime.state.diagnostic_report
+    assert all(
+        tuple(metric.key_columns) != ("asin",)
+        for metric in report.key_duplicate_metrics
+    )
+
+
+# ---------------------------------------------------------------------------
+# The safety invariant: unsafe deduplication is still refused
+# ---------------------------------------------------------------------------
+
+
+CONSTANT_KEY_CSV = (
+    b"grouping,value\n"
+    b"same,1\n"
+    b"same,2\n"
+    b"same,3\n"
+    b"same,4\n"
+    b"same,5\n"
+)
+
+NULL_KEY_CSV = (
+    b"code,value\n"
+    b"k1,1\n"
+    b",2\n"
+    b"k1,3\n"
+    b"k2,4\n"
+)
+
+
+def test_a_destructive_dedup_request_is_priced_then_refused() -> None:
+    """Nominating is not approving: the row-loss threshold still blocks it.
+
+    Deduplicating on a column holding one repeated value would collapse the
+    table. It is now measured rather than ignored, and the measurement is what
+    refuses it.
+    """
+
+    controller = _no_key_controller(
+        "drop the duplicate values based on the grouping column",
+        csv=CONSTANT_KEY_CSV,
+        row_loss=10.0,
+    )
+    state = controller.session.workflow_runtime.state
+
+    assert controller.session.intent.selected_key_columns == ("grouping",)
+    codes = {finding.code for finding in controller.session.findings}
+    validation_codes = {finding.code for finding in state.plan_validation.findings}
+    assert "ROW_LOSS_THRESHOLD" in validation_codes or "REQUEST_NOT_PLANNED" in codes
+    assert not state.plan_validation.valid
+    # And nothing can be approved while a blocking finding stands.
+    refused = controller.record_human_decision(
+        HumanDecision.APPROVE, command_id="approve"
+    )
+    assert refused.code == "PLAN_NOT_APPROVABLE"
+    assert controller.session.pending_approval is None
+
+
+def test_a_null_key_dedup_request_is_still_refused() -> None:
+    """The committed null-key guard is untouched by nomination."""
+
+    controller = _no_key_controller(
+        "drop the duplicate values based on the code column",
+        csv=NULL_KEY_CSV,
+    )
+    state = controller.session.workflow_runtime.state
+
+    assert controller.session.intent.selected_key_columns == ("code",)
+    assert not state.plan_validation.valid
+    assert "NULL_KEYS_UNSAFE" in {
+        finding.code for finding in state.plan_validation.findings
+    }
+    assert controller.session.workflow_runtime.gold_dataframe is None
+
+
+# ---------------------------------------------------------------------------
+# The near-miss column reference
+# ---------------------------------------------------------------------------
+
+
+def test_a_near_miss_column_reference_resolves_when_unambiguous() -> None:
+    """"boughtLastMonth" resolves to boughtInLastMonth, deterministically."""
+
+    frame = _frame(unique_titles=False)
+    requests = _by_column(_compile(VERBATIM_OBJECTIVE, frame))
+
+    assert requests["boughtInLastMonth"].operation_type is OperationType.DROP_COLUMN
+
+
+def test_an_ambiguous_near_miss_reference_resolves_to_nothing() -> None:
+    """Two plausible columns means the reference is left alone, not guessed."""
+
+    frame = pd.DataFrame(
+        {
+            "boughtInLastMonth": [0, None],
+            "boughtInLastMonthTotal": [0, None],
+            "keep": [1, 2],
+        }
+    )
+    report = diagnose_raw_dataframe(frame, selected_key_columns=())
+
+    assert compile_requests("drop the boughtLastMonth column", frame, report) == ()
+
+
+def test_a_single_loose_word_never_renames_a_column() -> None:
+    """The relaxed rule needs at least two words, so "month" resolves nothing."""
+
+    frame = pd.DataFrame({"boughtInLastMonth": [0, None], "keep": [1, 2]})
+    report = diagnose_raw_dataframe(frame, selected_key_columns=())
+
+    assert compile_requests("drop the month column", frame, report) == ()
+
+
+# ---------------------------------------------------------------------------
+# The whole objective, on both planners
+# ---------------------------------------------------------------------------
+
+
+def test_the_verbatim_objective_produces_the_requested_types_and_parameters() -> None:
+    controller = _no_key_controller()
+
+    assert _sequence(_plan_of(controller)) == VERBATIM_EXPECTED
+
+
+def test_the_verbatim_objective_matches_on_the_live_style_planner() -> None:
+    controller = _no_key_controller(planner_factory=_CrewLikePlanner)
+
+    assert _sequence(_plan_of(controller)) == VERBATIM_EXPECTED
+    # No arbitrary CONSTANT survived, including on boughtInLastMonth.
+    assert all(
+        operation.parameters.strategy is not ImputeStrategy.CONSTANT
+        for operation in _plan_of(controller).operations
+        if operation.operation_type is OperationType.IMPUTE_MISSING
+    )
+    assert [
+        finding.code for finding in controller.session.findings if finding.blocking
+    ] == []
+
+
+def test_the_crew_no_longer_imputes_a_column_the_user_asked_to_drop() -> None:
+    """The reported plan imputed boughtInLastMonth; it must be dropped instead."""
+
+    controller = _no_key_controller(planner_factory=_CrewLikePlanner)
+    plan = _plan_of(controller)
+
+    imputed = {
+        operation.target_columns[0]
+        for operation in plan.operations
+        if operation.operation_type is OperationType.IMPUTE_MISSING
+    }
+    assert "boughtInLastMonth" not in imputed
+    assert "category_id" not in imputed
+    dropped = {
+        operation.target_columns[0]
+        for operation in plan.operations
+        if operation.operation_type is OperationType.DROP_COLUMN
+    }
+    assert {"boughtInLastMonth", "category_id"} <= dropped
+
+
+def test_the_verbatim_objective_runs_to_qa_passing_gold_on_both_planners() -> None:
+    for factory in (None, _CrewLikePlanner):
+        controller = _no_key_controller(planner_factory=factory)
+        assert controller.record_human_decision(
+            HumanDecision.APPROVE, command_id="approve"
+        ).changed
+        assert controller.execute_current_plan(command_id="execute").changed
+
+        state = controller.session.workflow_runtime.state
+        assert state.stage is WorkflowStage.QA_PASSED
+        assert state.qa_report.status is QAStatus.PASS
+        gold = controller.session.workflow_runtime.gold_dataframe
+        assert list(gold.columns) == ["asin", "title", "stars", "price"]
+        assert len(gold) == 4
+        assert gold["asin"].is_unique
+        assert int(gold.isna().sum().sum()) == 0
+        assert len(controller.build_artifacts().artifacts()) == 7
+
+
+def test_the_streamlit_path_with_the_verbatim_objective_and_no_key_selection() -> None:
+    """The real smoke test: type the objective, touch nothing else, approve."""
+
+    from streamlit.testing.v1 import AppTest
+
+    from ui import state as ui_state
+
+    def widget(at, kind, key):
+        for element in getattr(at, kind):
+            if getattr(element, "key", None) == key:
+                return element
+        raise KeyError(f"{kind}:{key}")
+
+    at = AppTest.from_file(str(REPO_ROOT / "ui" / "app.py"), default_timeout=180)
+    at.run()
+    at.file_uploader[0].set_value(("amazon.csv", MODE_CSV, "text/csv"))
+    at.run()
+    widget(at, "button", ui_state.DIAGNOSE_WIDGET).click()
+    at.run()
+    widget(at, "button", ui_state.CONTINUE_TO_INTENT_WIDGET).click()
+    at.run()
+    # Only the objective is typed. No key columns, no cast selection.
+    widget(at, "text_area", ui_state.GOAL_WIDGET).set_value(VERBATIM_OBJECTIVE)
+    widget(at, "slider", ui_state.ROW_LOSS_WIDGET).set_value(50.0)
+    widget(at, "button", ui_state.SUBMIT_INTENT_WIDGET).click()
+    at.run()
+    widget(at, "button", ui_state.PREPARE_PLAN_WIDGET).click()
+    at.run()
+
+    controller = at.session_state[ui_state.CONTROLLER]
+    assert _sequence(_plan_of(controller)) == VERBATIM_EXPECTED
+    assert [
+        finding.code for finding in controller.session.findings if finding.blocking
+    ] == []
+    rendered = " ".join(element.value for element in at.markdown)
+    assert "Not in this plan" not in rendered
+    assert controller.session.workflow_runtime.gold_dataframe is None
+
+    widget(at, "button", ui_state.APPROVE_WIDGET).click()
+    at.run()
+    widget(at, "button", ui_state.EXECUTE_WIDGET).click()
+    at.run()
+
+    runtime = at.session_state[ui_state.CONTROLLER].session.workflow_runtime
+    assert runtime.state.stage is WorkflowStage.QA_PASSED
+    assert runtime.state.qa_report.status is QAStatus.PASS
+    gold = runtime.gold_dataframe
+    assert list(gold.columns) == ["asin", "title", "stars", "price"]
+    assert gold["asin"].is_unique and len(gold) == 4
+    assert len(at.download_button) == 7
+    assert len(at.exception) == 0, [item.value for item in at.exception]

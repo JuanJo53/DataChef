@@ -121,14 +121,19 @@ def accept_source(
     session: ApplicationSession,
     source: ParsedDataset,
 ) -> tuple[ApplicationSession, bool]:
-    """Accept a new source or return the exact session for the same upload request."""
+    """Accept a new source or return the exact session for the same upload request.
+
+    Accepting a file does not move the user off Upload; running the diagnosis
+    does. Uploading a second file therefore rewinds presentation to the start
+    of the flow, which matches the evidence being cleared alongside it.
+    """
 
     if session.last_upload_request_id == source.metadata.request_id:
         return session, False
     return (
         _changed(
             session,
-            screen=ScreenId.DIAGNOSE,
+            screen=ScreenId.UPLOAD,
             source=source,
             display_diagnostic_report=None,
             intent=None,
@@ -165,7 +170,7 @@ def record_diagnosis(
         return session
     return _changed(
         session,
-        screen=ScreenId.INTENT,
+        screen=ScreenId.DIAGNOSE,
         display_diagnostic_report=report,
         suggested_questions=questions,
     )
@@ -238,22 +243,41 @@ def record_command_attempt(
 
 
 def screen_for_workflow_stage(stage: WorkflowStage) -> ScreenId:
-    """Map Phase 1A evidence to presentation without authorizing transitions."""
+    """Map Phase 1A evidence to presentation without authorizing transitions.
+
+    Every stage from execution onwards lands on Results. Quality assurance is
+    still the mandatory internal gate — a run that does not pass it withholds
+    gold, downloads, and the dashboard exactly as before — but it is no longer
+    a place the user is sent, so Results is where both verdicts are read.
+    """
 
     return {
         WorkflowStage.INITIAL: ScreenId.UPLOAD,
-        WorkflowStage.DIAGNOSED: ScreenId.INTENT,
+        WorkflowStage.DIAGNOSED: ScreenId.DIAGNOSE,
         WorkflowStage.INTENT_CAPTURED: ScreenId.INTENT,
         WorkflowStage.CONTEXT_READY: ScreenId.PLAN,
         WorkflowStage.PLANNING: ScreenId.PLAN,
         WorkflowStage.PLAN_REJECTED: ScreenId.PLAN,
         WorkflowStage.AWAITING_APPROVAL: ScreenId.APPROVAL,
-        WorkflowStage.EXECUTING: ScreenId.QA,
-        WorkflowStage.EXECUTION_FAILED: ScreenId.QA,
+        WorkflowStage.EXECUTING: ScreenId.RESULTS,
+        WorkflowStage.EXECUTION_FAILED: ScreenId.RESULTS,
         WorkflowStage.QA_PASSED: ScreenId.RESULTS,
-        WorkflowStage.QA_WARNING: ScreenId.QA,
-        WorkflowStage.QA_FAILED: ScreenId.QA,
+        WorkflowStage.QA_WARNING: ScreenId.RESULTS,
+        WorkflowStage.QA_FAILED: ScreenId.RESULTS,
     }[stage]
+
+
+def furthest_screen_for_workflow_stage(stage: WorkflowStage) -> ScreenId:
+    """Furthest screen this evidence unlocks, which is not where it lands.
+
+    Execution lands on Results whatever the verdict, but only a passing run
+    earns the dashboard. Keeping that rule here rather than in the shell means
+    the sidebar cannot offer a dashboard the controller would refuse to build.
+    """
+
+    if stage is WorkflowStage.QA_PASSED:
+        return ScreenId.DASHBOARD
+    return screen_for_workflow_stage(stage)
 
 
 def record_runtime(
@@ -430,5 +454,6 @@ __all__ = [
     "set_preview",
     "defensive_session_snapshot",
     "defensive_runtime_snapshot",
+    "furthest_screen_for_workflow_stage",
     "screen_for_workflow_stage",
 ]

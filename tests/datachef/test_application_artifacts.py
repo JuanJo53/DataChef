@@ -182,10 +182,20 @@ def test_cleaned_csv_bytes_read_back_as_the_gold_table() -> None:
         lineterminator="\n",
         na_rep="",
     ).encode("utf-8")
-    reloaded = pd.read_csv(StringIO(content.decode("utf-8")), index_col=False)
+    reloaded = pd.read_csv(
+        StringIO(content.decode("utf-8")),
+        index_col=False,
+        dtype=str,
+        keep_default_na=False,
+        na_filter=False,
+    )
     assert tuple(reloaded.columns) == tuple(gold.columns)
     assert reloaded.shape == gold.shape
-    assert artifacts_module._rendered(reloaded) == artifacts_module._rendered(gold)
+    for position, column in enumerate(gold.columns):
+        assert tuple(reloaded.iloc[:, position]) == tuple(
+            artifacts_module._csv_text(value) for value in gold[column]
+        )
+    assert artifacts_module._csv_round_trips(content, gold)
 
 
 def test_cleaned_parquet_bytes_read_back_with_the_gold_fingerprint() -> None:
@@ -634,6 +644,153 @@ def test_bytes_that_do_not_read_back_as_gold_yield_no_bundle(monkeypatch) -> Non
 
     assert isinstance(failure, ArtifactFailure)
     assert failure.code.value == "ROUND_TRIP_MISMATCH"
+
+
+# The gold tables below stand in for what a real run produces. Every one of
+# them packages perfectly well; each used to be refused because the *reader*
+# used for verification disagreed with the bytes, not because the bytes were
+# wrong. They are the regression set for that defect.
+_SOUND_GOLD_TABLES = {
+    # A mean or median lands on a full-precision double. Pandas' default CSV
+    # float parser is not round-trip exact, so re-reading it changed the last
+    # bits and the whole bundle was refused. This is the case a user hit.
+    "imputed-mean": pd.DataFrame(
+        {"amount": [6.1, 15.0, 48.3, 22.983333333333334, 35.3]}
+    ),
+    "arbitrary-floats": pd.DataFrame(
+        {"x": [0.1 + 0.2, 1 / 3, 1e-20, -1.7976931348623157e308]}
+    ),
+    # Text that merely looks like something else. Re-reading with inference
+    # turned "1.50" into 1.5, "007" into 7, and "NA" into a missing value.
+    "numeric-looking-text": pd.DataFrame({"sku": ["1.50", "2.00", "3", "007"]}),
+    "missing-token-text": pd.DataFrame({"code": ["NA", "null", "None", "ok"]}),
+    "empty-string-text": pd.DataFrame({"title": ["a", "", "c"]}),
+    "mixed-text-and-missing": pd.DataFrame({"note": ["0", None, "2"]}),
+    "nullable-integers": pd.DataFrame({"n": pd.array([1, None, 3], dtype="Int64")}),
+    "dates": pd.DataFrame({"day": pd.to_datetime(["2026-01-01", "2026-01-02"])}),
+    "awkward-text": pd.DataFrame(
+        {"text": ['he said "hi"', "a,b", "x\ny", "  padded  ", "caf\u00e9"]}
+    ),
+    "everything-missing": pd.DataFrame({"a": [None, None], "b": [1.0, 2.0]}),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_SOUND_GOLD_TABLES))
+def test_a_soundly_packaged_table_is_never_called_a_round_trip_mismatch(
+    name: str,
+) -> None:
+    gold = _SOUND_GOLD_TABLES[name].reset_index(drop=True)
+
+    assert artifacts_module._csv_round_trips(artifacts_module._csv_bytes(gold), gold)
+    assert artifacts_module._parquet_round_trips(
+        artifacts_module._parquet_bytes(gold),
+        gold,
+    )
+
+
+def test_a_mean_imputed_run_still_produces_the_whole_bundle() -> None:
+    """End to end over the controller, on the shape that exposed the defect.
+
+    ``amount`` is imputed with its own mean, so gold carries a value no
+    fixed-width decimal renders exactly. The bundle must still be built.
+    """
+
+    controller = _controller(
+        _csv_request(
+            b"order_id,region,amount\n"
+            b"1,North,6.1\n"
+            b"2,South,15.0\n"
+            b"3,North,48.3\n"
+            b"4,West,\n"
+            b"5,East,35.3\n"
+            b"6,North,\n"
+            b"7,South,6.6\n"
+            b"8,West,26.6\n"
+        )
+    )
+    controller.submit_intent(
+        _intent(user_goal="Impute amount with mean.", selected_key_columns=()),
+        (),
+    )
+    assert controller.prepare_plan(command_id="plan").code == "PLAN_AWAITING_APPROVAL"
+    assert controller.record_human_decision(
+        HumanDecision.APPROVE,
+        command_id="approve",
+    ).changed
+    assert controller.execute_current_plan(command_id="execute").changed
+    runtime = controller.session.workflow_runtime
+    assert runtime is not None and runtime.state.stage is WorkflowStage.QA_PASSED
+    # The imputed value is genuinely one the default CSV reader rewrites.
+    imputed = runtime.gold_dataframe["amount"].iloc[3]
+    assert imputed == 22.983333333333334
+    assert pd.read_csv(StringIO(f"a\n{imputed}\n"))["a"].iloc[0] != imputed
+
+    bundle = controller.build_artifacts()
+
+    assert isinstance(bundle, ArtifactSet)
+    assert len(bundle.artifacts()) == 7
+
+
+@pytest.mark.parametrize(
+    ("name", "corrupt"),
+    (
+        ("changed-value", lambda text: text.replace("North", "Nrth", 1)),
+        ("dropped-row", lambda text: "\n".join(text.split("\n")[:-2]) + "\n"),
+        ("renamed-column", lambda text: text.replace("region", "area", 1)),
+        ("blanked-cell", lambda text: text.replace(",North,", ",,", 1)),
+        ("extra-row", lambda text: text + "9,North,99,2026-01-09\n"),
+    ),
+)
+def test_a_genuinely_corrupted_csv_still_refuses_the_bundle(
+    monkeypatch,
+    name: str,
+    corrupt,
+) -> None:
+    """The verification is looser about formatting, not about content."""
+
+    del name
+    honest = artifacts_module._csv_bytes
+
+    def corrupted(gold: pd.DataFrame) -> bytes:
+        text = honest(gold).decode("utf-8")
+        altered = corrupt(text)
+        assert altered != text
+        return altered.encode("utf-8")
+
+    monkeypatch.setattr(artifacts_module, "_csv_bytes", corrupted)
+
+    failure = _gold_controller().build_artifacts()
+
+    assert isinstance(failure, ArtifactFailure)
+    assert failure.code.value == "ROUND_TRIP_MISMATCH"
+
+
+def test_a_corrupted_parquet_still_refuses_the_bundle(monkeypatch) -> None:
+    honest = artifacts_module._parquet_bytes
+
+    def corrupted(gold: pd.DataFrame) -> bytes:
+        altered = gold.copy()
+        altered.iloc[0, 0] = altered.iloc[1, 0]
+        return honest(altered)
+
+    monkeypatch.setattr(artifacts_module, "_parquet_bytes", corrupted)
+
+    failure = _gold_controller().build_artifacts()
+
+    assert isinstance(failure, ArtifactFailure)
+    assert failure.code.value == "ROUND_TRIP_MISMATCH"
+
+
+def test_verification_reads_the_packaged_bytes_and_not_the_gold_frame() -> None:
+    """A guard against the check quietly becoming a comparison with itself."""
+
+    gold = pd.DataFrame({"a": [1.5, 2.5], "b": ["x", "y"]})
+    sound = artifacts_module._csv_bytes(gold)
+
+    assert artifacts_module._csv_round_trips(sound, gold)
+    assert not artifacts_module._csv_round_trips(sound.replace(b"x", b"z"), gold)
+    assert not artifacts_module._csv_round_trips(sound.replace(b"1.5", b"1.6"), gold)
+    assert not artifacts_module._csv_round_trips(sound.replace(b"a,b", b"a,c"), gold)
 
 
 def test_pipeline_script_ships_as_the_seventh_artifact() -> None:

@@ -172,7 +172,7 @@ def _render_approval_record(approval: Any) -> None:
 
 
 def render(controller: Any, state: Any) -> None:
-    st.header("4 · Approve")
+    st.header("5 · Approve")
     session = controller.session
     runtime = session.workflow_runtime
     if runtime is None:

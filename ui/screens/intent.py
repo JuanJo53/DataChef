@@ -37,7 +37,7 @@ def _render_suggested_questions(session: Any) -> list[str]:
 
 
 def render(controller: Any, state: Any) -> None:
-    st.header("2 · Objective")
+    st.header("3 · Objective")
     session = controller.session
     if session.source is None or session.display_diagnostic_report is None:
         st.info("Upload a dataset and run the diagnosis first.")

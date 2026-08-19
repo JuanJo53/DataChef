@@ -182,21 +182,14 @@ def canonical_json(payload: Any) -> bytes:
     )
 
 
-def _cell(value: object) -> str:
+def _csv_text(value: object) -> str:
+    """The text ``to_csv`` writes for one value, with ``na_rep=""`` for missing."""
+
     try:
         missing = bool(pd.isna(value))
     except (TypeError, ValueError):
         missing = False
-    if missing:
-        return "<NA>"
-    return str(value)
-
-
-def _rendered(frame: pd.DataFrame) -> tuple[tuple[str, ...], ...]:
-    return tuple(
-        tuple(_cell(value) for value in row)
-        for row in frame.itertuples(index=False, name=None)
-    )
+    return "" if missing else str(value)
 
 
 def _csv_bytes(gold: pd.DataFrame) -> bytes:
@@ -209,18 +202,66 @@ def _parquet_bytes(gold: pd.DataFrame) -> bytes:
     return buffer.getvalue()
 
 
+def _values_match(reparsed: pd.Series, original: pd.Series) -> bool:
+    """Compare two same-length series exactly, treating missing as equal."""
+
+    left_missing = reparsed.isna().to_numpy()
+    if not bool((left_missing == original.isna().to_numpy()).all()):
+        return False
+    present = ~left_missing
+    return bool(
+        (reparsed.to_numpy()[present] == original.to_numpy()[present]).all()
+    )
+
+
+def _column_round_trips(text: pd.Series, original: pd.Series) -> bool:
+    """Check one re-read text column against the gold column it encodes.
+
+    Date-like values are the one family whose written text is shorter than
+    ``str(value)``: ``to_csv`` drops a whole-day time component. They are read
+    back into their own dtype and compared as values. Everything else —
+    numbers included — is written with ``str``, so comparing the text is both
+    exact and free of any guess about what the column contains.
+    """
+
+    kinds = pd.api.types
+    if kinds.is_datetime64_any_dtype(original):
+        return _values_match(pd.to_datetime(text, errors="coerce"), original)
+    if kinds.is_timedelta64_dtype(original):
+        return _values_match(pd.to_timedelta(text, errors="coerce"), original)
+    return tuple(text) == tuple(_csv_text(value) for value in original)
+
+
 def _csv_round_trips(content: bytes, gold: pd.DataFrame) -> bool:
-    """CSV preserves rendered tabular values, not Pandas dtype identity."""
+    """Check the packaged CSV re-reads as the gold table.
+
+    The file is re-read as raw text: no dtype inference, no missing-value
+    token guessing. Letting Pandas infer would compare its guesses about the
+    file against gold instead of comparing the file's own contents, and each
+    guess has its own way of disagreeing with a table that packaged perfectly
+    well. The default float parser is not round-trip exact, so any column
+    holding a computed value — a mean, a median — could differ in its last
+    bits. A text column of digits comes back numeric, so ``"1.50"`` returns as
+    ``1.5``. A text value spelled ``NA`` or left empty comes back missing.
+    None of those are defects in the bytes, and all of them used to refuse a
+    sound bundle.
+    """
 
     reloaded = pd.read_csv(
         StringIO(content.decode("utf-8")),
         index_col=False,
         skip_blank_lines=False,
+        dtype=str,
+        keep_default_na=False,
+        na_filter=False,
     )
-    return bool(
-        tuple(reloaded.columns) == tuple(gold.columns)
-        and reloaded.shape == gold.shape
-        and _rendered(reloaded) == _rendered(gold)
+    if tuple(reloaded.columns) != tuple(gold.columns):
+        return False
+    if reloaded.shape != gold.shape:
+        return False
+    return all(
+        _column_round_trips(reloaded.iloc[:, position], gold.iloc[:, position])
+        for position in range(gold.shape[1])
     )
 
 

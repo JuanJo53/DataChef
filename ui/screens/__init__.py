@@ -53,8 +53,10 @@ def build_transformation_requests(
 def render_diagnosis(session: Any) -> None:
     """Render the deterministic diagnosis the controller already produced.
 
-    Shared so the screen the user actually lands on after diagnosing shows this
-    evidence. Values are read off session evidence; nothing is derived here.
+    Shared because more than one screen shows it: Diagnostics is where it is
+    read, and Upload and Objective repeat it in place so a user revisiting
+    either does not have to navigate away to remember what the file looked
+    like. Values are read off session evidence; nothing is derived here.
     """
 
     report = session.display_diagnostic_report
@@ -153,16 +155,24 @@ def has_blocking(findings: Any) -> bool:
 
 
 def render_screen(screen: ScreenId, controller: Any, state: Any) -> None:
-    from ui.screens import approval, intent, plan, qa, results, upload
+    from ui.screens import (
+        approval,
+        dashboard,
+        diagnostics,
+        intent,
+        plan,
+        results,
+        upload,
+    )
 
     renderers = {
         ScreenId.UPLOAD: upload.render,
-        ScreenId.DIAGNOSE: upload.render,
+        ScreenId.DIAGNOSE: diagnostics.render,
         ScreenId.INTENT: intent.render,
         ScreenId.PLAN: plan.render,
         ScreenId.APPROVAL: approval.render,
-        ScreenId.QA: qa.render,
         ScreenId.RESULTS: results.render,
+        ScreenId.DASHBOARD: dashboard.render,
     }
     renderers[screen](controller, state)
 

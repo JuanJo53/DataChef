@@ -550,7 +550,7 @@ class DataChefController:
         # is compiled here, locally, from the free-form goal and the raw frame,
         # and only when the caller supplied no typed requests of its own, so an
         # explicit caller always wins. Nothing compiled here reaches a provider.
-        requests = self._with_compiled_requests(intent, requests)
+        intent, requests = self._with_compiled_requests(intent, requests)
         previous = self._session
         try:
             self._session = record_intent(
@@ -580,7 +580,7 @@ class DataChefController:
         self,
         intent: UserIntent,
         requests: tuple[RequestedTransformation, ...],
-    ) -> tuple[RequestedTransformation, ...]:
+    ) -> tuple[UserIntent, tuple[RequestedTransformation, ...]]:
         """Merge typed requests from the objective with any the caller supplied.
 
         Both are real user intent: the checkboxes on the Objective screen and the
@@ -594,7 +594,7 @@ class DataChefController:
         source = self._session.source
         report = self._session.display_diagnostic_report
         if source is None or report is None or not intent.user_goal.strip():
-            return requests
+            return intent, requests
         try:
             from datachef.application.request_compiler import compile_requests
 
@@ -602,7 +602,7 @@ class DataChefController:
         except Exception:
             # Compilation is a convenience, never a gate. A failure leaves the
             # session with whatever the caller supplied rather than blocking.
-            return requests
+            return intent, requests
 
         claimed = {
             (request.operation_type, tuple(request.target_columns))
@@ -622,7 +622,45 @@ class DataChefController:
                 continue
             claimed.add(key)
             merged.append(candidate)
-        return tuple(merged)
+        return self._with_nominated_keys(intent, tuple(merged)), tuple(merged)
+
+    def _with_nominated_keys(
+        self,
+        intent: UserIntent,
+        requests: tuple[RequestedTransformation, ...],
+    ) -> UserIntent:
+        """Nominate the keys an explicit deduplication request names.
+
+        Asking to "drop the duplicate values based on the asin column" *is* the
+        statement that asin identifies a record, which is exactly what
+        ``selected_key_columns`` means. Recording it there is what lets the
+        deterministic estimator price the request: diagnosis measures duplicate
+        and null-key counts for every nominated key set, and both
+        ``prepare_workflow`` and the authoritative recomputation read the same
+        field, so planning and the execution gate cannot disagree about it.
+
+        This nominates; it does not approve. An unpriceable or destructive key is
+        still refused downstream by the existing row-loss threshold and null-key
+        guards, and a key the estimator cannot measure still leaves the request
+        unplanned and blocking.
+        """
+
+        nominated = tuple(
+            column
+            for request in requests
+            if request.operation_type is OperationType.DEDUPLICATE_BY_KEYS
+            for column in request.target_columns
+        )
+        missing = tuple(
+            column
+            for column in dict.fromkeys(nominated)
+            if column not in intent.selected_key_columns
+        )
+        if not missing:
+            return intent
+        return intent.model_copy(
+            update={"selected_key_columns": intent.selected_key_columns + missing}
+        )
 
     def _requested_operations(self) -> tuple[RequestedOperation, ...]:
         return tuple(

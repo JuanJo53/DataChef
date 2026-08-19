@@ -18,7 +18,7 @@ if PROJECT_ROOT not in sys.path:
 import streamlit as st
 
 from datachef.application import ScreenId
-from datachef.application.session import screen_for_workflow_stage
+from datachef.application.session import furthest_screen_for_workflow_stage
 from ui import state as ui_state
 from ui.screens import render_screen
 
@@ -29,34 +29,37 @@ LOGO_PATH = os.path.join(
     "Gemini_Generated_Image_adhg9madhg9madhg.png",
 )
 
-# Display labels only. ScreenId values and every stage->screen mapping are
-# unchanged; this tuple is the presentation order of the six stages.
+# Display labels only. This tuple is the presentation order of the seven
+# screens, and every one of them is a place the user can actually be. Quality
+# assurance is absent because it is not a screen: it remains the mandatory
+# internal gate that decides whether Results has any gold to show.
 _PROGRESS = (
     (ScreenId.UPLOAD, "1 · Upload"),
-    (ScreenId.INTENT, "2 · Objective"),
-    (ScreenId.PLAN, "3 · Plan"),
-    (ScreenId.APPROVAL, "4 · Approve"),
-    (ScreenId.QA, "5 · Quality"),
+    (ScreenId.DIAGNOSE, "2 · Diagnostics"),
+    (ScreenId.INTENT, "3 · Objective"),
+    (ScreenId.PLAN, "4 · Plan"),
+    (ScreenId.APPROVAL, "5 · Approve"),
     (ScreenId.RESULTS, "6 · Results"),
+    (ScreenId.DASHBOARD, "7 · Dashboard"),
 )
 
 _ORDER = {screen: index for index, (screen, _) in enumerate(_PROGRESS)}
-_ORDER[ScreenId.DIAGNOSE] = 0
 
 
 def _reached_position(session) -> int:
     """Furthest stage the workflow itself has reached.
 
-    Derived from the workflow stage through the existing public
-    ``screen_for_workflow_stage`` mapping, so the UI never invents its own
-    notion of progress. Combined with the controller's current screen so that
-    navigating back does not hide the stages already earned.
+    Derived from the workflow stage through the public
+    ``furthest_screen_for_workflow_stage`` mapping, so the UI never invents its
+    own notion of progress -- including whether the dashboard is earned, which
+    only a passing quality gate decides. Combined with the controller's current
+    screen so that navigating back does not hide the stages already earned.
     """
 
     positions = [_ORDER.get(session.screen, 0)]
     runtime = session.workflow_runtime
     if runtime is not None:
-        positions.append(_ORDER[screen_for_workflow_stage(runtime.state.stage)])
+        positions.append(_ORDER[furthest_screen_for_workflow_stage(runtime.state.stage)])
     return max(positions)
 
 
@@ -168,8 +171,9 @@ def run_app() -> None:
     session = controller.session
     st.title("DataChef")
     st.caption(
-        "Upload → Objective → Plan → Approve → Quality → Results. "
-        "Nothing leaves this machine and no plan runs without your approval."
+        "Upload → Diagnostics → Objective → Plan → Approve → Results "
+        "→ Dashboard. Nothing leaves this machine and no plan runs without "
+        "your approval."
     )
     render_screen(session.screen, controller, state)
 

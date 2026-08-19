@@ -58,6 +58,8 @@ UPLOAD_PREVIEW_WIDGET = "datachef_w_upload_preview"
 STAGE_NAV_WIDGET = "datachef_w_stage_nav"
 RESET_WIDGET = "datachef_w_reset"
 DIAGNOSE_WIDGET = "datachef_w_diagnose"
+CONTINUE_TO_INTENT_WIDGET = "datachef_w_continue_to_intent"
+CONTINUE_TO_DASHBOARD_WIDGET = "datachef_w_continue_to_dashboard"
 SUBMIT_INTENT_WIDGET = "datachef_w_submit_intent"
 PREPARE_PLAN_WIDGET = "datachef_w_prepare_plan"
 APPROVE_WIDGET = "datachef_w_approve"
@@ -231,6 +233,8 @@ __all__ = [
     "AgentRegistry",
     "APPROVE_WIDGET",
     "CAST_REQUEST_WIDGET",
+    "CONTINUE_TO_DASHBOARD_WIDGET",
+    "CONTINUE_TO_INTENT_WIDGET",
     "CONTROLLER",
     "DEDUP_REQUEST_WIDGET",
     "DIAGNOSE_WIDGET",

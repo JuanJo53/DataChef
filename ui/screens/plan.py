@@ -149,7 +149,7 @@ def _render_reviews(state_evidence: Any) -> None:
 
 
 def render(controller: Any, state: Any) -> None:
-    st.header("3 · Plan")
+    st.header("4 · Plan")
     session = controller.session
     if session.intent is None:
         st.info("Describe what you need before a plan can be prepared.")

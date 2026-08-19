@@ -81,6 +81,9 @@ def _upload_and_diagnose(
     at.run()
     _widget(at, "button", ui_state.DIAGNOSE_WIDGET).click()
     at.run()
+    # Diagnosing lands on Diagnostics, screen 2. The objective is screen 3.
+    _widget(at, "button", ui_state.CONTINUE_TO_INTENT_WIDGET).click()
+    at.run()
     return at
 
 
@@ -139,7 +142,7 @@ def _assert_locked_down(at: AppTest) -> None:
     _assert_no_traceback(at)
 
 
-def test_happy_path_reaches_pass_with_full_bundle_and_dashboard() -> None:
+def test_happy_path_reaches_pass_with_the_full_bundle_on_results() -> None:
     at = _pass_run()
 
     session = _controller(at).session
@@ -154,13 +157,109 @@ def test_happy_path_reaches_pass_with_full_bundle_and_dashboard() -> None:
         "datachef_w_download_PIPELINE_SCRIPT_PY",
         "datachef_w_download_MANIFEST_JSON",
     ]
-    assert "DataChef Dashboard" in [header.value for header in at.header]
+    # The dashboard is its own screen now, so Results does not draw one.
+    assert "DataChef Dashboard" not in [header.value for header in at.header]
+    assert "6 \u00b7 Results" in [header.value for header in at.header]
     assert tuple(item.kind.value for item in session.command_history) == (
         "PLAN_PREPARATION",
         "HUMAN_DECISION",
         "EXECUTION",
     )
     _assert_no_traceback(at)
+
+
+def test_results_carries_the_quality_evidence_the_run_produced() -> None:
+    """Quality assurance stopped being a screen; its evidence did not move."""
+
+    at = _pass_run()
+
+    text = _all_text(at)
+    report = _controller(at).session.workflow_runtime.state.qa_report
+    assert report.status is QAStatus.PASS
+    assert "Quality report" in text
+    assert report.qa_report_id in text
+    assert "Execution" in text
+    labels = {item.label: item.value for item in at.metric}
+    assert labels["Rows before"] == str(report.before_row_count)
+    assert labels["Rows after"] == str(report.after_row_count)
+    assert labels["Columns after"] == str(report.after_column_count)
+    _assert_no_traceback(at)
+
+
+def test_a_failed_quality_run_reports_itself_on_results() -> None:
+    """The failing verdict has to be readable somewhere, and Results is it."""
+
+    at = _app()
+    _upload_and_diagnose(at, CAST_FAILURE_JSON, "records.json", "application/json")
+    _submit_intent(at, cast_columns=["amount_text"], row_loss=40.0)
+    _prepare(at)
+    _approve_and_execute(at)
+
+    session = _controller(at).session
+    assert session.workflow_runtime.state.stage is WorkflowStage.QA_FAILED
+    assert session.screen.value == "RESULTS"
+    text = _all_text(at)
+    assert "Quality assurance failed" in text
+    assert "Gold was withheld" in text
+    assert "Quality report" in text
+    _assert_locked_down(at)
+
+
+def test_the_dashboard_is_its_own_screen_reached_from_results() -> None:
+    at = _pass_run()
+    assert _controller(at).session.screen.value == "RESULTS"
+
+    _widget(at, "button", ui_state.CONTINUE_TO_DASHBOARD_WIDGET).click()
+    at.run()
+
+    session = _controller(at).session
+    assert session.screen.value == "DASHBOARD"
+    headers = [header.value for header in at.header]
+    assert "7 \u00b7 Dashboard" in headers
+    assert "DataChef Dashboard" in headers
+    # Results owns the bundle; the dashboard screen carries no download.
+    assert len(at.download_button) == 0
+    # Nothing was re-run to get here.
+    assert tuple(item.kind.value for item in session.command_history) == (
+        "PLAN_PREPARATION",
+        "HUMAN_DECISION",
+        "EXECUTION",
+    )
+    _assert_no_traceback(at)
+
+
+def test_the_dashboard_refuses_to_draw_without_a_passing_quality_gate() -> None:
+    """Navigating straight to screen 7 grants nothing the controller withheld."""
+
+    at = _app()
+    _upload_and_diagnose(at, DEMO_CSV, "orders.csv")
+    _submit_intent(at, key_columns=["order_id"], row_loss=10.0)
+    _prepare(at)
+    controller = _controller(at)
+    assert controller.session.workflow_runtime.state.stage is WorkflowStage.AWAITING_APPROVAL
+
+    controller.navigate(ScreenId.DASHBOARD)
+    at.run()
+
+    session = _controller(at).session
+    assert session.screen.value == "DASHBOARD"
+    assert session.pending_approval is None
+    assert session.workflow_runtime.state.stage is WorkflowStage.AWAITING_APPROVAL
+    assert session.workflow_runtime.gold_dataframe is None
+    assert "GOLD_UNAVAILABLE" in _all_text(at)
+    _assert_locked_down(at)
+
+
+def test_results_offers_no_dashboard_shortcut_without_a_bundle() -> None:
+    at = _app()
+    _upload_and_diagnose(at, CAST_FAILURE_JSON, "records.json", "application/json")
+    _submit_intent(at, cast_columns=["amount_text"], row_loss=40.0)
+    _prepare(at)
+    _approve_and_execute(at)
+
+    assert _controller(at).session.screen.value == "RESULTS"
+    assert not _has(at, "button", ui_state.CONTINUE_TO_DASHBOARD_WIDGET)
+    _assert_locked_down(at)
 
 
 def test_page_refresh_after_pass_performs_no_further_work() -> None:
@@ -227,7 +326,7 @@ def test_genuine_quality_failure_offers_no_downloads_or_dashboard() -> None:
     session = _controller(at).session
     assert session.workflow_runtime.state.stage is WorkflowStage.QA_FAILED
     assert session.workflow_runtime.gold_dataframe is None
-    assert session.screen.value == "QA"
+    assert session.screen.value == "RESULTS"
     _assert_locked_down(at)
 
 
@@ -672,16 +771,96 @@ def test_operation_risk_renders_as_text_on_the_approval_screen() -> None:
     _assert_no_traceback(at)
 
 
-def test_stage_indicator_renders_all_six_stages_and_marks_the_current_one() -> None:
+def test_stage_indicator_renders_all_seven_screens_and_marks_the_current_one() -> None:
     at = _app()
     at.run()
 
     sidebar_text = " ".join(item.value for item in at.sidebar.markdown)
-    for label in ("1 · Upload", "2 · Objective", "3 · Plan", "4 · Approve",
-                  "5 · Quality", "6 · Results"):
+    for label in (
+        "1 · Upload",
+        "2 · Diagnostics",
+        "3 · Objective",
+        "4 · Plan",
+        "5 · Approve",
+        "6 · Results",
+        "7 · Dashboard",
+    ):
         assert label in sidebar_text
     assert "**➡️ 1 · Upload**" in sidebar_text
-    assert "◻️ 6 · Results" in sidebar_text
+    assert "◻️ 7 · Dashboard" in sidebar_text
+    # Quality assurance is not a place the user goes.
+    assert "Quality" not in sidebar_text
+    _assert_no_traceback(at)
+
+
+def test_the_progress_rail_never_offers_a_quality_screen() -> None:
+    at = _pass_run()
+
+    sidebar_text = " ".join(item.value for item in at.sidebar.markdown)
+    assert "Quality" not in sidebar_text
+    navigation = {
+        button.key
+        for button in at.sidebar.button
+        if str(button.key).startswith(ui_state.STAGE_NAV_WIDGET)
+    }
+    assert f"{ui_state.STAGE_NAV_WIDGET}_QA" not in navigation
+    assert f"{ui_state.STAGE_NAV_WIDGET}_DIAGNOSE" in navigation
+    _assert_no_traceback(at)
+
+
+def test_diagnostics_is_screen_two_and_shows_the_deterministic_evidence() -> None:
+    at = _app()
+    at.run()
+    at.file_uploader[0].set_value(("orders.csv", DEMO_CSV, "text/csv"))
+    at.run()
+    # Accepting a file does not move the user; running the diagnosis does.
+    assert _controller(at).session.screen.value == "UPLOAD"
+
+    _widget(at, "button", ui_state.DIAGNOSE_WIDGET).click()
+    at.run()
+
+    session = _controller(at).session
+    assert session.screen.value == "DIAGNOSE"
+    assert "2 · Diagnostics" in [header.value for header in at.header]
+    report = session.display_diagnostic_report
+    labels = {item.label: item.value for item in at.metric}
+    assert labels["Rows"] == f"{report.dataset_identity.row_count:,}"
+    assert labels["Columns"] == f"{report.dataset_identity.column_count:,}"
+    assert labels["Duplicate rows"] == f"{report.duplicate_row_count:,}"
+    assert labels["Complete values"] == (
+        f"{report.legacy_evidence.completeness_pct:.2f}%"
+    )
+    text = _all_text(at)
+    assert "Every column as it arrived" in text
+    assert "Duplicate keys" in text
+    # It is a read of existing evidence: no plan, no workflow, no command.
+    assert session.workflow_runtime is None
+    assert session.command_history == ()
+    _assert_locked_down(at)
+
+
+def test_the_objective_screen_is_reached_from_diagnostics_as_screen_three() -> None:
+    at = _app()
+    _upload_and_diagnose(at, DEMO_CSV, "orders.csv")
+
+    session = _controller(at).session
+    assert session.screen.value == "INTENT"
+    assert "3 · Objective" in [header.value for header in at.header]
+    _assert_no_traceback(at)
+
+
+def test_plan_and_approve_are_screens_four_and_five() -> None:
+    at = _app()
+    _upload_and_diagnose(at, DEMO_CSV, "orders.csv")
+    _submit_intent(at, key_columns=["order_id"], row_loss=10.0)
+
+    assert _controller(at).session.screen.value == "PLAN"
+    assert "4 · Plan" in [header.value for header in at.header]
+
+    _prepare(at)
+
+    assert _controller(at).session.screen.value == "APPROVAL"
+    assert "5 · Approve" in [header.value for header in at.header]
     _assert_no_traceback(at)
 
 

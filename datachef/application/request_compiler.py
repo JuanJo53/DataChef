@@ -146,7 +146,72 @@ def _columns_in(clause: str, known: tuple[str, ...]) -> tuple[str, ...]:
         ):
             continue
         hits.append((match.start(), column))
+    # A hand-written objective may name a column slightly differently from the
+    # schema; resolve those only when the reference is unambiguous.
+    matched = {column for _, column in hits}
+    hits.extend(_relaxed_matches(clause, known, matched))
     return tuple(column for _, column in sorted(hits))
+
+
+
+def _tokens(name: str) -> tuple[str, ...]:
+    """Split an identifier into lowercase words: boughtInLastMonth -> bought in last month."""
+
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", name)
+    return tuple(part.lower() for part in re.split(r"[^0-9A-Za-z]+", spaced) if part)
+
+
+def _is_ordered_subsequence(needle: tuple[str, ...], haystack: tuple[str, ...]) -> bool:
+    position = 0
+    for token in needle:
+        while position < len(haystack) and haystack[position] != token:
+            position += 1
+        if position == len(haystack):
+            return False
+        position += 1
+    return True
+
+
+def _relaxed_matches(
+    clause: str,
+    known: tuple[str, ...],
+    already: set[str],
+) -> list[tuple[int, str]]:
+    """Resolve a near-miss column reference, deterministically and only when unique.
+
+    An objective written by hand says "boughtLastMonth" for a column actually
+    called "boughtInLastMonth". Rather than fuzzy distance, this asks a structural
+    question: are the words of the written name an ordered subsequence of the
+    words of a real column name? "bought last month" is a subsequence of "bought
+    in last month", so it resolves; "price" is not a subsequence of anything else.
+
+    Two guards keep it honest. The written reference must carry at least two
+    words, so a single loose word can never rename a column. And if more than one
+    column matches, nothing is resolved -- an ambiguous reference is left alone
+    rather than guessed at.
+    """
+
+    hits: list[tuple[int, str]] = []
+    column_tokens = {column: _tokens(column) for column in known}
+    for match in re.finditer(r"[0-9A-Za-z_]{4,}", clause):
+        word = match.group(0)
+        needle = _tokens(word)
+        if len(needle) < 2:
+            continue
+        candidates = [
+            column
+            for column, tokens in column_tokens.items()
+            if column not in already
+            and needle != tokens
+            and _is_ordered_subsequence(needle, tokens)
+        ]
+        if len(candidates) != 1:
+            continue
+        column = candidates[0]
+        if any(column == existing for _, existing in hits):
+            continue
+        hits.append((match.start(), column))
+    return hits
 
 
 def _mentions(clause: str, words: tuple[str, ...]) -> bool:
