@@ -1,5 +1,3 @@
--c constraints-hackathon.txt
-
 streamlit>=1.25.0
 plotly>=5.0.0
 pandas>=2.0.0
