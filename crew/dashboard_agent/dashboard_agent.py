@@ -237,7 +237,7 @@ def build_llm_insights(kpis: list[dict], rule_insights: list[str]) -> list[str] 
         from langchain_google_genai import ChatGoogleGenerativeAI
 
         llm = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash",  # flash = rapido y barato para texto corto
+            model="gemini-3.6-flash",  # flash = rapido y barato para texto corto
             temperature=0.3,
             google_api_key=api_key,
         )

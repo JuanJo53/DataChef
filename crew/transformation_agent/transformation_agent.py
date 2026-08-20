@@ -53,7 +53,7 @@ def generate_transformation_code(
     """
 
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.6-flash",
         contents=system_prompt,
     )
     return clean_code_block(response.text)
@@ -79,7 +79,7 @@ def fix_failing_code(
     """
 
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.6-flash",
         contents=fix_prompt,
     )
     return clean_code_block(response.text)
