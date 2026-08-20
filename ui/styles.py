@@ -1,6 +1,5 @@
 import streamlit as st
 
-<<<<<<< HEAD
 
 def apply_global_styles() -> None:
     st.markdown(
@@ -178,9 +177,11 @@ def apply_global_styles() -> None:
 
             margin-top: -12px;
             margin-bottom: 32px;
-        }
-
-=======
+        }</tyle>
+""",
+        unsafe_allow_html=True,
+    )
+    
 def _apply_custom_styles():
     st.markdown(
         """
@@ -587,12 +588,10 @@ def _apply_custom_styles():
 
 
 
->>>>>>> e06cd9448222cb24d599f60cadcb74634ba1226c
         </style>
         """,
         unsafe_allow_html=True,
     )
-<<<<<<< HEAD
 
 
 
@@ -1067,5 +1066,3 @@ def upload_styles() -> None:
         """,
         unsafe_allow_html=True,
     )
-=======
->>>>>>> e06cd9448222cb24d599f60cadcb74634ba1226c

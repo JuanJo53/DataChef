@@ -43,16 +43,13 @@ _PROGRESS = (
     (ScreenId.RESULTS, "6 · Results"),
     (ScreenId.DASHBOARD, "7 · Dashboard"),
 )
-<<<<<<< HEAD
 
 _ORDER = {screen: index for index, (screen, _) in enumerate(_PROGRESS)}
-=======
 from ui.charts import render_charts
 from ui.ingestion_view import render_ingestion
 from ui.styles import _apply_custom_styles
 
 
->>>>>>> e06cd9448222cb24d599f60cadcb74634ba1226c
 
 
 def _reached_position(session) -> int:
@@ -71,7 +68,6 @@ def _reached_position(session) -> int:
         positions.append(_ORDER[furthest_screen_for_workflow_stage(runtime.state.stage)])
     return max(positions)
 
-<<<<<<< HEAD
 """
 def _render_stage_indicator(controller, session) -> None:
     current = _ORDER.get(session.screen, 0)
@@ -91,7 +87,8 @@ def _render_stage_indicator(controller, session) -> None:
             ):
                 controller.navigate(screen)
                 st.rerun()
-=======
+"""
+
 def _init_state():
     defaults = {
         "stage": 0,
@@ -217,19 +214,17 @@ def _render_upload_stage():
         if uploaded_file.name.endswith(".csv"):
             st.session_state["raw_df"] = pd.read_csv(uploaded_file)
 
->>>>>>> e06cd9448222cb24d599f60cadcb74634ba1226c
         else:
             st.sidebar.markdown(f"◻️ {label}")
-"""
+
 def _render_stage_indicator(controller, session) -> None:
     current = _ORDER.get(session.screen, 0)
     reached = _reached_position(session)
 
-<<<<<<< HEAD
     st.sidebar.markdown(
         '<div class="progress-title">Progress</div>',
         unsafe_allow_html=True,
-=======
+    )
     # =====================================================
     # DATASET LOADED
     # =====================================================
@@ -336,7 +331,6 @@ def _render_transform_stage():
     st.markdown(
         "The **Action Agent** executes transformations directly in a **Local Sandbox** "
         "with automatic **Self-Healing** capabilities upon encountering syntax errors."
->>>>>>> e06cd9448222cb24d599f60cadcb74634ba1226c
     )
 
     for screen, label in _PROGRESS:
@@ -378,7 +372,6 @@ def _render_transform_stage():
 
 
 
-<<<<<<< HEAD
 def _render_sidebar(controller, state) -> None:
     session = controller.session
 
@@ -387,7 +380,6 @@ def _render_sidebar(controller, state) -> None:
             LOGO_PATH,
             width="stretch",
         )
-=======
     with st.sidebar:
         st.image(LOGO_PATH, width=200)
 
@@ -415,7 +407,6 @@ def _render_sidebar(controller, state) -> None:
         """,
         unsafe_allow_html=True,
     )
->>>>>>> e06cd9448222cb24d599f60cadcb74634ba1226c
 
 
     _render_stage_indicator(controller, session)
