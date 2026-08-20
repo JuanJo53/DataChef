@@ -23,6 +23,7 @@ from ui import state as ui_state
 from ui.screens import render_screen
 from ui.styles import apply_global_styles
 from ui.styles import upload_styles
+from ui.styles import diagnostics_styles
 
 LOGO_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
@@ -215,6 +216,7 @@ def run_app() -> None:
 
     apply_global_styles()
     upload_styles()
+    diagnostics_styles()
     _load_local_configuration()
 
 

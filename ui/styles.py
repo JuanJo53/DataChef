@@ -535,3 +535,400 @@ def upload_styles() -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
+def diagnostics_styles() -> None:
+    st.markdown(
+        """
+        <style>
+
+        /* ========================================
+           DIAGNOSTICS
+        ======================================== */
+
+        .diagnostic-section-space {
+            height: 12px;
+        }
+
+        .diagnostic-bottom-space {
+            height: 25px;
+        }
+
+
+        /* ========================================
+           DATA HEALTH CARDS
+        ======================================== */
+
+        .diagnostic-metric-card {
+            min-height: 84px;
+            padding: 17px 18px;
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            transition:
+                transform 0.25s ease,
+                box-shadow 0.25s ease,
+                border-color 0.25s ease;
+        }
+
+        .diagnostic-metric-card:hover {
+            transform: translateY(-2px);
+        }
+
+
+        /* GREEN CARD */
+
+        .metric-green {
+            background:
+                linear-gradient(
+                    135deg,
+                    rgba(16, 185, 129, 0.12),
+                    rgba(6, 78, 59, 0.18)
+                );
+            border:
+                1px solid rgba(16, 185, 129, 0.38);
+        }
+
+        .metric-green:hover {
+            box-shadow:
+                0 8px 25px rgba(16, 185, 129, 0.10);
+        }
+
+
+        /* BLUE CARD */
+
+        .metric-blue {
+            background:
+                linear-gradient(
+                    135deg,
+                    rgba(59, 130, 246, 0.13),
+                    rgba(30, 64, 175, 0.14)
+                );
+            border:
+                1px solid rgba(59, 130, 246, 0.38);
+        }
+
+        .metric-blue:hover {
+            box-shadow:
+                0 8px 25px rgba(59, 130, 246, 0.10);
+        }
+
+
+        /* PURPLE CARD */
+
+        .metric-purple {
+            background:
+                linear-gradient(
+                    135deg,
+                    rgba(147, 51, 234, 0.13),
+                    rgba(88, 28, 135, 0.17)
+                );
+            border:
+                1px solid rgba(168, 85, 247, 0.38);
+        }
+
+        .metric-purple:hover {
+            box-shadow:
+                0 8px 25px rgba(147, 51, 234, 0.12);
+        }
+
+
+        /* RED CARD */
+
+        .metric-red {
+            background:
+                linear-gradient(
+                    135deg,
+                    rgba(244, 63, 94, 0.10),
+                    rgba(127, 29, 29, 0.10)
+                );
+            border:
+                1px solid rgba(244, 63, 94, 0.12);
+        }
+
+
+        /* ========================================
+           METRIC CONTENT
+        ======================================== */
+
+        .diagnostic-metric-label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+
+            font-size: 0.78rem;
+            font-weight: 500;
+            color: rgba(226, 232, 240, 0.72);
+
+            margin-bottom: 4px;
+        }
+
+        .diagnostic-metric-value {
+            color: #F8FAFC;
+            font-size: 1.48rem;
+            line-height: 1.2;
+            font-weight: 750;
+            letter-spacing: -0.3px;
+        }
+
+
+        /* ========================================
+           COLORED DOT
+        ======================================== */
+
+        .metric-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+
+            background:
+                linear-gradient(
+                    135deg,
+                    #86EFAC,
+                    #10B981
+                );
+
+            box-shadow:
+                0 0 7px rgba(16, 185, 129, 0.45);
+        }
+
+        .metric-blue .metric-dot {
+            background:
+                linear-gradient(
+                    135deg,
+                    #86EFAC,
+                    #10B981
+                );
+        }
+
+        .metric-purple .metric-dot,
+        .metric-red .metric-dot {
+            background:
+                linear-gradient(
+                    135deg,
+                    #FB7185,
+                    #BE123C
+                );
+
+            box-shadow:
+                0 0 7px rgba(244, 63, 94, 0.40);
+        }
+
+
+        /* ========================================
+           DESCRIPTION UNDER METRIC
+        ======================================== */
+
+        .diagnostic-metric-description {
+            padding-top: 9px;
+            min-height: 40px;
+
+            color: rgba(203, 213, 225, 0.62);
+            font-size: 0.75rem;
+            line-height: 1.4;
+        }
+
+
+        /* ========================================
+           ISSUE CARDS
+        ======================================== */
+
+        .diagnostic-issue-card {
+            width: 100%;
+
+            padding: 14px 14px 13px 14px;
+            margin-bottom: 11px;
+
+            border-radius: 9px;
+
+            background:
+                linear-gradient(
+                    135deg,
+                    rgba(15, 12, 28, 0.65),
+                    rgba(22, 15, 38, 0.48)
+                );
+
+            border:
+                1px solid rgba(139, 92, 246, 0.34);
+
+            transition:
+                border-color 0.25s ease,
+                background 0.25s ease,
+                transform 0.25s ease,
+                box-shadow 0.25s ease;
+        }
+
+        .diagnostic-issue-card:hover {
+            border-color:
+                rgba(167, 139, 250, 0.55);
+
+            background:
+                linear-gradient(
+                    135deg,
+                    rgba(20, 15, 36, 0.78),
+                    rgba(31, 20, 51, 0.60)
+                );
+
+            box-shadow:
+                0 6px 22px rgba(76, 29, 149, 0.10);
+
+            transform: translateY(-1px);
+        }
+
+
+        /* ========================================
+           ISSUE FIRST ROW
+        ======================================== */
+
+        .issue-main-line {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+
+            gap: 7px;
+
+            color: rgba(241, 245, 249, 0.94);
+
+            font-size: 0.82rem;
+            line-height: 1.5;
+        }
+
+        .issue-title {
+            font-weight: 700;
+            color: #F8FAFC;
+        }
+
+        .issue-label {
+            color: rgba(226, 232, 240, 0.92);
+        }
+
+        .issue-row-count {
+            color: #F8FAFC;
+            font-weight: 650;
+        }
+
+        .issue-separator {
+            color: rgba(148, 163, 184, 0.60);
+        }
+
+
+        /* ========================================
+           SEVERITY BADGES
+        ======================================== */
+
+        .severity-badge {
+            display: inline-flex;
+            align-items: center;
+
+            padding: 1px 6px;
+
+            border-radius: 4px;
+
+            font-size: 0.66rem;
+            font-weight: 700;
+
+            line-height: 1.5;
+        }
+
+        .severity-low {
+            color: #86EFAC;
+            background: rgba(16, 185, 129, 0.17);
+        }
+
+        .severity-medium {
+            color: #FDE68A;
+            background: rgba(245, 158, 11, 0.18);
+        }
+
+        .severity-high {
+            color: #6EE7B7;
+            background: rgba(5, 150, 105, 0.22);
+        }
+
+
+        /* ========================================
+           ISSUE DESCRIPTION
+        ======================================== */
+
+        .issue-description {
+            margin-top: 12px;
+
+            color: rgba(203, 213, 225, 0.62);
+
+            font-size: 0.74rem;
+            line-height: 1.55;
+        }
+
+        .issue-arrow {
+            color: rgba(148, 163, 184, 0.75);
+        }
+
+        .issue-suggestion {
+            font-style: italic;
+            color: rgba(203, 213, 225, 0.68);
+        }
+
+
+        /* ========================================
+           NO ISSUES
+        ======================================== */
+
+        .diagnostic-success-card {
+            padding: 18px;
+
+            border-radius: 10px;
+
+            border:
+                1px solid rgba(16, 185, 129, 0.30);
+
+            background:
+                rgba(16, 185, 129, 0.08);
+
+            color: #A7F3D0;
+
+            font-weight: 600;
+        }
+
+
+        /* ========================================
+           EXPANDERS
+        ======================================== */
+
+        [data-testid="stExpander"] {
+            border:
+                1px solid rgba(139, 92, 246, 0.22) !important;
+
+            border-radius: 10px !important;
+
+            background:
+                rgba(15, 12, 28, 0.32) !important;
+        }
+
+        [data-testid="stExpander"]:hover {
+            border-color:
+                rgba(139, 92, 246, 0.40) !important;
+        }
+
+
+        /* ========================================
+           RESPONSIVE
+        ======================================== */
+
+        @media (max-width: 900px) {
+
+            .diagnostic-metric-card {
+                min-height: 76px;
+            }
+
+            .diagnostic-metric-value {
+                font-size: 1.25rem;
+            }
+
+        }
+
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
