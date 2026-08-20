@@ -25,6 +25,7 @@ from crew.transformation_agent.transformation_agent import (
     save_pipeline_script,
 )
 from ui.charts import render_charts
+from ui.dashboard_chat import render_dashboard_chat
 from ui.ingestion_view import render_ingestion
 from ui.styles import _apply_custom_styles
 
@@ -410,6 +411,9 @@ def _render_dashboard_stage():
     with st.expander("📤  Export to Tableau"):
         res = to_tableau(spec)
         st.info(f"Status: {res['status']} — {res['reason']}")
+
+    st.divider()
+    render_dashboard_chat(df)
 
 
 def run_app():
