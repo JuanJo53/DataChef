@@ -94,6 +94,12 @@ def _is_pii(name: str, serie: pd.Series) -> bool:
     return hits >= max(3, len(muestra) // 2)
 
 
+def _zero_count(series: pd.Series) -> int:
+    try:
+        return int(series.eq(0).sum())
+    except (TypeError, ValueError):
+        return 0
+
 # =====================================================================
 # 1. PERFIL por columna
 # =====================================================================
@@ -114,6 +120,7 @@ def profile_columns(df: pd.DataFrame) -> list[dict]:
                 "unique": unicos,
                 "is_pk_candidate": (nulos == 0 and unicos == total and total > 0),
                 "is_pii": _is_pii(col, serie),
+                "zero_count": _zero_count(serie),
             }
         )
     return perfil

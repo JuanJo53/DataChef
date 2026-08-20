@@ -1,0 +1,4 @@
+category,observed_on,measure_text,state,note
+ alpha ,2026-08-01,$10.00,ready,
+beta,not-a-date,missing,READY,review
+beta,not-a-date,missing,READY,review
