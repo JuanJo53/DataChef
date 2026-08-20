@@ -133,6 +133,14 @@ def render_charts(report_data: dict):
         data = _aggregate(df, chart)
         # La columna Y es "count" en graficos de conteo, o la medida real.
         ycol = "count" if (chart.get("agg") == "count" or chart.get("y") is None) else chart["y"]
+
+        # A numeric dimension (e.g. Store = 1..45) is a category, not a
+        # continuous scale. As text, Plotly draws one bar per category instead
+        # of spreading them over a numeric axis full of gaps.
+        if ctype in ("bar", "pie"):
+            data = data.copy()
+            data[chart["x"]] = data[chart["x"]].astype(str)
+
         if ctype == "line":
             fig = px.line(data, x=chart["x"], y=ycol, markers=True, color_discrete_sequence=[color])
         elif ctype == "area":
@@ -141,6 +149,10 @@ def render_charts(report_data: dict):
             fig = px.pie(data, names=chart["x"], values=ycol, color_discrete_sequence=_shades(color, len(data)))
         else:  # bar
             fig = px.bar(data, x=chart["x"], y=ycol, color_discrete_sequence=[color])
+            # Plotly still reads "16" as a number and would revert to a
+            # continuous axis even though the data is text; the axis has to be
+            # declared categorical.
+            fig.update_xaxes(type="category")
         st.plotly_chart(fig, use_container_width=True, key=f"dash_chart_{i}")
 
     # 3) Insights en lenguaje natural.

@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import time
 import asyncio
 import pandas as pd
 from dotenv import find_dotenv, load_dotenv
@@ -13,6 +14,22 @@ if sys.platform == "win32":
 # Carga automáticamente el archivo .env buscando desde la raíz del proyecto
 load_dotenv(find_dotenv())
 
+# A "lite" ALIAS, not a fixed version. Two reasons:
+#
+# 1. ALIAS, not a version: Google retires old versions. gemini-2.5-flash and
+#    gemini-2.5-flash-lite already return 404. The alias always tracks the
+#    current model, so that error cannot come back.
+# 2. LITE, not regular flash: on the free tier the quota is PER MODEL per day.
+#    gemini-flash-latest points at the newest flash (today gemini-3.7-flash),
+#    which carries the tightest quota: 20 requests/day. That runs out fast,
+#    since one transformation can spend several (each Self-Healing is another
+#    call). The lite family is the cheapest and has the most headroom.
+MODEL = "gemini-flash-lite-latest"
+
+# Retries ONLY for 503 (server busy). See _is_transient_error.
+API_RETRIES = 3
+RETRY_BASE_SECONDS = 4
+
 
 def get_client():
     """Inicializa el cliente oficial de Google GenAI usando la API Key."""
@@ -22,6 +39,45 @@ def get_client():
             "Falta la variable de entorno GOOGLE_API_KEY. Configúrala en tu archivo .env"
         )
     return genai.Client(api_key=api_key)
+
+
+def _is_transient_error(e: Exception) -> bool:
+    """True if the failure is "Google is busy" (503), which retrying DOES fix.
+
+    Same classification smoke_test_gemini.py uses: key (401/403), model (404)
+    and quota (429) errors do not improve by waiting, so those propagate
+    immediately instead of making the user sit through a backoff.
+    """
+    msg = str(e)
+    return "503" in msg or "UNAVAILABLE" in msg or "high demand" in msg
+
+
+def _generate_with_retries(client, contents: str) -> str:
+    """Call Gemini, retrying ONLY when the server is busy.
+
+    Without this a transient 503 (very common on the free tier) killed the
+    whole transformation with a red error, even though retrying a few seconds
+    later works. The wait grows on each attempt (linear backoff).
+    """
+    for attempt in range(1, API_RETRIES + 1):
+        try:
+            response = client.models.generate_content(
+                model=MODEL,
+                contents=contents,
+            )
+            return response.text
+        except Exception as e:
+            # Last attempt, or an error that waiting will not fix -> propagate.
+            if attempt == API_RETRIES or not _is_transient_error(e):
+                raise
+            wait = RETRY_BASE_SECONDS * attempt
+            print(
+                f"[wait] Google servers are busy (attempt {attempt}/"
+                f"{API_RETRIES}), retrying in {wait}s..."
+            )
+            time.sleep(wait)
+    # Unreachable: the loop exits via return or raise.
+    raise RuntimeError("retries exhausted")
 
 
 def clean_code_block(text: str) -> str:
@@ -35,54 +91,55 @@ def clean_code_block(text: str) -> str:
 def generate_transformation_code(
     columns_info: str, user_prompt: str, client
 ) -> str:
-    """Solicita al LLM la generación del script de Pandas."""
+    """Ask the LLM to generate the pandas script.
+
+    The prompt is in English on purpose: the model answers in the language it
+    is asked in, and a Spanish prompt produced Spanish comments inside the
+    generated script that the user then sees on screen.
+    """
     system_prompt = f"""
-    Eres un Senior Data Engineer experto en Python y Pandas.
-    
-    Tienes un DataFrame de Pandas cargado en la variable 'df' con las siguientes columnas y tipos de datos:
+    You are a Senior Data Engineer, expert in Python and Pandas.
+
+    A pandas DataFrame is loaded in the variable 'df' with these columns and dtypes:
     {columns_info}
 
-    El usuario solicitó la siguiente transformación en lenguaje natural:
+    The user requested the following transformation in natural language:
     "{user_prompt}"
 
-    REGLAS ESTRICTAS DE SALIDA:
-    1. Devuelve ÚNICAMENTE código ejecutable de Python dentro de un bloque ```python ... ```.
-    2. Asume que el DataFrame ya existe en memoria bajo el nombre `df`.
-    3. Asegúrate de que el resultado final procesado se mantenga/guarde en la variable `df`.
-    4. NO agregues explicaciones, comentarios de texto ni introducción. Solo el código Python.
+    STRICT OUTPUT RULES:
+    1. Return ONLY executable Python code inside a ```python ... ``` block.
+    2. Assume the DataFrame already exists in memory under the name `df`.
+    3. Make sure the final processed result stays in the variable `df`.
+    4. Write any code comments in English.
+    5. If the user mentions a column that does not exist, do NOT invent it:
+       apply the closest sensible operation on the real columns listed above.
+    6. Do NOT add explanations or introductions outside the code block.
     """
 
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=system_prompt,
-    )
-    return clean_code_block(response.text)
+    return clean_code_block(_generate_with_retries(client, system_prompt))
 
 
 def fix_failing_code(
     failing_code: str, error_msg: str, columns_info: str, client
 ) -> str:
-    """Auto-corrige el código de Python que falló en la ejecución (Self-Healing)."""
+    """Self-healing: fix the pandas code that failed at execution time."""
     fix_prompt = f"""
-    El siguiente código de Pandas falló durante la ejecución:
+    The following pandas code failed during execution:
     ```python
     {failing_code}
     ```
 
-    Produjo el siguiente error de Python:
+    It produced this Python error:
     "{error_msg}"
 
-    Información de columnas del DataFrame 'df':
+    Columns available on the DataFrame 'df':
     {columns_info}
 
-    Por favor, analiza el error, corrígelo y devuelve ÚNICAMENTE el código corregido dentro de un bloque ```python ... ```.
+    Analyse the error, fix it, and return ONLY the corrected code inside a
+    ```python ... ``` block. Write any code comments in English.
     """
 
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=fix_prompt,
-    )
-    return clean_code_block(response.text)
+    return clean_code_block(_generate_with_retries(client, fix_prompt))
 
 
 def execute_transformation_with_sandbox(
@@ -98,7 +155,7 @@ def execute_transformation_with_sandbox(
     df_working = df_original.copy()
     columns_info = str(df_working.dtypes)
 
-    print("🤖 Generando script de transformación...")
+    print("[agent] Generating transformation script...")
     current_code = generate_transformation_code(
         columns_info, user_prompt, client
     )
@@ -107,7 +164,7 @@ def execute_transformation_with_sandbox(
     for attempt in range(1, max_retries + 1):
         try:
             print(
-                f"⚙️ [Intento {attempt}/{max_retries}] Ejecutando en Local Sandbox..."
+                f"[sandbox] [Attempt {attempt}/{max_retries}] Executing in Local Sandbox..."
             )
 
             # Creación del entorno aislado (Scope)
@@ -118,27 +175,27 @@ def execute_transformation_with_sandbox(
 
             # Recuperar el DataFrame transformado
             df_result = sandbox_scope["df"]
-            print("✅ ¡Transformación ejecutada exitosamente!")
+            print("[ok] Transformation executed successfully!")
 
             return df_result, current_code
 
         except Exception as e:
             error_message = str(e)
-            print(f"⚠️ Error en intento {attempt}: {error_message}")
+            print(f"[warn] Error on attempt {attempt}: {error_message}")
 
             if attempt < max_retries:
-                print("🔄 Aplicando Self-Healing para reparar el código...")
+                print("[heal] Applying Self-Healing to repair the code...")
                 current_code = fix_failing_code(
                     current_code, error_message, columns_info, client
                 )
 
     raise RuntimeError(
-        f"Error: No se pudo ejecutar la transformación tras {max_retries} intentos."
+        f"Error: transformation could not be executed after {max_retries} attempts."
     )
 
 
 # =====================================================================
-# 📄 FUNCIÓN PARA GUARDAR EL PIPELINE REUTILIZABLE
+# FUNCIÓN PARA GUARDAR EL PIPELINE REUTILIZABLE
 # =====================================================================
 def save_pipeline_script(
     code_script: str, output_path: str = "pipeline_transformacion.py"
@@ -154,7 +211,7 @@ import pandas as pd
 
 def run_pipeline(input_csv_path: str, output_csv_path: str):
     # 1. Cargar datos crudos
-    print(f"📂 Cargando archivo: {input_csv_path}")
+    print(f"[load] Loading file: {input_csv_path}")
     df = pd.read_csv(input_csv_path)
 
     # 2. Aplicar Transformaciones Registradas
@@ -173,7 +230,7 @@ def run_pipeline(input_csv_path: str, output_csv_path: str):
 
     # 3. Guardar resultado transformado
     df.to_csv(output_csv_path, index=False)
-    print(f"✅ Pipeline ejecutado con éxito. Guardado en: {output_csv_path}")
+    print(f"[ok] Pipeline executed successfully. Saved to: {output_csv_path}")
     return df
 
 if __name__ == "__main__":
@@ -185,5 +242,5 @@ if __name__ == "__main__":
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(full_script)
 
-    print(f"📄 ¡Pipeline reutilizable guardado con éxito en '{output_path}'!")
+    print(f"[saved] Reusable pipeline saved to '{output_path}'!")
     return output_path

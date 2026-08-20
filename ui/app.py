@@ -25,6 +25,7 @@ from crew.transformation_agent.transformation_agent import (
     save_pipeline_script,
 )
 from ui.charts import render_charts
+from ui.dashboard_chat import render_dashboard_chat
 from ui.ingestion_view import render_ingestion
 from ui.styles import _apply_custom_styles
 
@@ -348,6 +349,22 @@ def _render_transform_stage():
                 st.rerun()
 
 
+@st.cache_data(show_spinner="Building the dashboard...")
+def _cached_dashboard_spec(df: pd.DataFrame) -> dict:
+    """build_dashboard_spec, cached by DataFrame content.
+
+    Without this Streamlit re-runs the whole script on EVERY interaction
+    (including every chat message), and build_dashboard_spec calls Gemini with
+    use_llm=True for the insights. Result: each chat message waited on a fresh
+    LLM round trip -- about 2 minutes, with no loading indicator, and burning
+    free-tier quota for nothing.
+
+    Cached, it is computed ONCE per dataset and later interactions are instant.
+    If the df changes the key changes and it recomputes on its own.
+    """
+    return build_dashboard_spec(df)
+
+
 def _render_dashboard_stage():
     st.header("Stage 4: Dashboard and insights")
     st.markdown(
@@ -370,23 +387,13 @@ def _render_dashboard_stage():
 
     df = _to_gold(df)
 
-    goal = st.selectbox(
-        "What would you like to analyze?",
-        [
-            "Overview (auto)",
-            "Revenue by region",
-            "Order performance by month",
-            "Customer retention trend",
-        ],
-    )
-    audience = st.selectbox(
-        "Audience", ["Executive team", "Operations team", "Analyst team"]
-    )
-
-    spec = build_dashboard_spec(df)
+    # The "What would you like to analyze?" and "Audience" dropdowns used to sit
+    # here. They were removed because they did nothing: their values were only
+    # echoed back in the caption below and never reached the dashboard agent, so
+    # they implied a choice the app could not honour.
+    spec = _cached_dashboard_spec(df)
     st.caption(
-        f"Analyzed {spec['meta']['rows']} rows x {spec['meta']['columns']} cols "
-        f"| Goal: {goal} | Audience: {audience}"
+        f"Analyzed {spec['meta']['rows']} rows x {spec['meta']['columns']} cols"
     )
 
     render_charts({"spec": spec, "data": df})
@@ -410,6 +417,9 @@ def _render_dashboard_stage():
     with st.expander("📤  Export to Tableau"):
         res = to_tableau(spec)
         st.info(f"Status: {res['status']} — {res['reason']}")
+
+    st.divider()
+    render_dashboard_chat(df)
 
 
 def run_app():

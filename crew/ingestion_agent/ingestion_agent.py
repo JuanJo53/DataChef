@@ -333,7 +333,9 @@ def _llm_answer(df: pd.DataFrame, pregunta: str) -> str | None:
     try:
         from langchain_google_genai import ChatGoogleGenerativeAI
 
-        llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.2,
+        # Modelo distinto al del transformation_agent: cupo gratuito separado,
+        # y este chat es opcional (hay fallback por reglas si falla).
+        llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite", temperature=0.2,
                                      google_api_key=api_key)
         contexto = (
             f"Dataset shape: {df.shape[0]} rows x {df.shape[1]} columns.\n"
