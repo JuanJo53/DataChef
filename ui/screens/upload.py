@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
+
 import streamlit as st
+
+import textwrap
 
 from datachef.application import (
     CsvParserOptions,
@@ -70,11 +73,56 @@ def _request_for(upload: Any, json_mode: str) -> UploadRequest | None:
 
 def _render_source_summary(controller: Any, session: Any) -> None:
     identity = session.source.identity
-    left, middle, right = st.columns(3)
-    left.metric("Rows", identity.row_count)
-    middle.metric("Columns", identity.column_count)
-    right.metric("Dataset", identity.dataset_id)
-    st.caption(f"Source fingerprint `{identity.fingerprint}`")
+
+    left, middle, right = st.columns(3, gap="medium")
+
+    with left:
+        st.markdown(
+            textwrap.dedent(
+                f"""
+                <div class="metric-card metric-purple">
+                    <div class="metric-icon">🗄️</div>
+                    <div class="metric-content">
+                        <div class="metric-label">Rows</div>
+                        <div class="metric-value">{identity.row_count:,}</div>
+                    </div>
+                </div>
+                """
+            ),
+            unsafe_allow_html=True,
+        )
+
+    with middle:
+        st.markdown(
+            textwrap.dedent(
+                f"""
+                <div class="metric-card metric-blue">
+                    <div class="metric-icon">▦</div>
+                    <div class="metric-content">
+                        <div class="metric-label">Columns</div>
+                        <div class="metric-value">{identity.column_count:,}</div>
+                    </div>
+                </div>
+                """
+            ),
+            unsafe_allow_html=True,
+        )
+
+    with right:
+        st.markdown(
+            textwrap.dedent(
+                f"""
+                <div class="metric-card metric-green">
+                    <div class="metric-icon">📁</div>
+                    <div class="metric-content">
+                        <div class="metric-label">Dataset</div>
+                        <div class="metric-value metric-dataset">{identity.dataset_id}</div>
+                    </div>
+                </div>
+                """
+            ),
+            unsafe_allow_html=True,
+        )
 
     # Opt-in and off by default. A button rather than a second toggle so this
     # never fights the sidebar control for ownership of the same session flag.

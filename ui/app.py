@@ -21,7 +21,8 @@ from datachef.application import ScreenId
 from datachef.application.session import furthest_screen_for_workflow_stage
 from ui import state as ui_state
 from ui.screens import render_screen
-
+from ui.styles import apply_global_styles
+from ui.styles import upload_styles
 
 LOGO_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
@@ -62,7 +63,7 @@ def _reached_position(session) -> int:
         positions.append(_ORDER[furthest_screen_for_workflow_stage(runtime.state.stage)])
     return max(positions)
 
-
+"""
 def _render_stage_indicator(controller, session) -> None:
     current = _ORDER.get(session.screen, 0)
     reached = _reached_position(session)
@@ -83,12 +84,64 @@ def _render_stage_indicator(controller, session) -> None:
                 st.rerun()
         else:
             st.sidebar.markdown(f"◻️ {label}")
+"""
+def _render_stage_indicator(controller, session) -> None:
+    current = _ORDER.get(session.screen, 0)
+    reached = _reached_position(session)
+
+    st.sidebar.markdown(
+        '<div class="progress-title">Progress</div>',
+        unsafe_allow_html=True,
+    )
+
+    for screen, label in _PROGRESS:
+        position = _ORDER[screen]
+
+        # Current stage
+        if position == current:
+            st.sidebar.markdown(
+                f"""
+                <div class="stage-current">
+                    <span>●</span>
+                    <span>{label}</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        # Completed / already reached stage
+        elif position <= reached:
+            if st.sidebar.button(
+                f"✓  {label}",
+                key=f"{ui_state.STAGE_NAV_WIDGET}_{screen.value}",
+                use_container_width=True,
+            ):
+                controller.navigate(screen)
+                st.rerun()
+
+        # Future stage
+        else:
+            st.sidebar.markdown(
+                f"""
+                <div class="stage-pending">
+                    <span>○</span>
+                    <span>{label}</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )            
+
 
 
 def _render_sidebar(controller, state) -> None:
     session = controller.session
-    st.sidebar.title("DataChef")
-    st.sidebar.caption("Offline, deterministic, human-approved data preparation.")
+
+    if os.path.exists(LOGO_PATH):
+        st.sidebar.image(
+            LOGO_PATH,
+            width="stretch",
+        )
+
 
     _render_stage_indicator(controller, session)
 
@@ -153,18 +206,39 @@ def _load_local_configuration() -> None:
 
 
 def run_app() -> None:
-    st.set_page_config(page_title="DataChef", layout="wide")
 
+    st.set_page_config(
+        page_title="DataChef",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+
+    apply_global_styles()
+    upload_styles()
     _load_local_configuration()
+
+    if os.path.exists(LOGO_PATH):
+        left, center, right = st.columns([1, 2, 1])
+
+        with center:
+            st.image(
+                LOGO_PATH,
+                width="stretch",
+            )
+        st.markdown(
+            """
+            <div class="main-subtitle">
+                Agentic workflow for ingestion, transformation, and dashboarding
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     state = st.session_state
     # Reset runs before any widget is instantiated so widget keys can be cleared.
     ui_state.apply_pending_reset(state)
 
     controller = ui_state.get_controller(state)
-
-    if os.path.exists(LOGO_PATH):
-        st.logo(LOGO_PATH, size="large")
 
     _render_sidebar(controller, state)
 
