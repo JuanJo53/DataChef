@@ -23,7 +23,6 @@ from crew.dashboard_agent.dashboard_agent import build_dashboard_spec
 from crew.dashboard_agent.exporters import to_powerbi, to_tableau
 from crew.transformation_agent.transformation_agent import (
     execute_transformation_with_sandbox,
-    save_pipeline_script,
 )
 from ui.charts import render_charts
 from ui.dashboard_chat import render_dashboard_chat
@@ -354,7 +353,7 @@ def _render_transform_stage():
         st.dataframe(st.session_state["gold_df"], use_container_width=True)
 
         # =====================================================================
-        # BLOQUE DE DESCARGA DE DATOS GOLD MULTIFORMATO (SANITISADO)
+        # BLOQUE DE DESCARGA DE DATOS GOLD MULTIFORMATO
         # =====================================================================
         st.subheader("📥 Download Transformed Data (Gold Layer)")
 
@@ -435,14 +434,17 @@ def _render_transform_stage():
 
         col1, col2 = st.columns(2)
         with col1:
-            if st.button(
-                "📄 Export Reusable Pipeline (.py)", use_container_width=True
-            ):
-                path = save_pipeline_script(
-                    st.session_state["generated_code"],
-                    "pipeline_transformacion.py",
-                )
-                st.success(f"Pipeline saved to `{path}`!")
+            # DESCARGA DIRECTA A LA CARPETA DOWNLOADS DEL NAVEGADOR
+            pipeline_code = st.session_state.get("generated_code", "")
+            
+            st.download_button(
+                label="📄 Export Reusable Pipeline (.py)",
+                data=pipeline_code.encode("utf-8") if pipeline_code else "",
+                file_name="pipeline_transformacion.py",
+                mime="text/x-python",
+                key="btn_download_pipeline_script",
+                use_container_width=True,
+            )
 
         with col2:
             if st.button(
