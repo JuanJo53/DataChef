@@ -354,53 +354,66 @@ def _render_transform_stage():
         st.dataframe(st.session_state["gold_df"], use_container_width=True)
 
         # =====================================================================
-        # BLOQUE DE DESCARGA DE DATOS GOLD MULTIFORMATO (SUBSANADO)
+        # BLOQUE DE DESCARGA DE DATOS GOLD MULTIFORMATO
         # =====================================================================
         st.subheader("📥 Download Transformed Data (Gold Layer)")
 
-        format_choice = st.selectbox(
-            "Select export format:",
-            options=["CSV", "Parquet", "JSON", "Excel"],
-            key="download_format_selector",
-        )
-
         df_export = st.session_state["gold_df"]
 
-        if format_choice == "CSV":
-            file_data = df_export.to_csv(index=False).encode("utf-8")
-            file_name = "data_gold.csv"
-            mime_type = "text/csv"
+        col_csv, col_xlsx, col_parquet, col_json = st.columns(4)
 
-        elif format_choice == "Parquet":
-            buf = io.BytesIO()
-            df_export.to_parquet(buf, index=False)
-            buf.seek(0)
-            file_data = buf.getvalue()
-            file_name = "data_gold.parquet"
-            mime_type = "application/octet-stream"
+        # 1. CSV
+        with col_csv:
+            csv_bytes = df_export.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="📄 Download CSV",
+                data=csv_bytes,
+                file_name="data_gold.csv",
+                mime="text/csv",
+                key="btn_download_gold_csv",
+                use_container_width=True,
+            )
 
-        elif format_choice == "JSON":
-            file_data = df_export.to_json(orient="records", indent=2).encode("utf-8")
-            file_name = "data_gold.json"
-            mime_type = "application/json"
-
-        elif format_choice == "Excel":
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        # 2. Excel (.xlsx)
+        with col_xlsx:
+            buf_excel = io.BytesIO()
+            with pd.ExcelWriter(buf_excel, engine="openpyxl") as writer:
                 df_export.to_excel(writer, index=False)
-            buf.seek(0)
-            file_data = buf.getvalue()
-            file_name = "data_gold.xlsx"
-            mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            buf_excel.seek(0)
+            st.download_button(
+                label="📊 Download Excel",
+                data=buf_excel.getvalue(),
+                file_name="data_gold.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="btn_download_gold_xlsx",
+                use_container_width=True,
+            )
 
-        st.download_button(
-            label=f"⬇️ Download {file_name}",
-            data=file_data,
-            file_name=file_name,
-            mime=mime_type,
-            key=f"dl_btn_{format_choice}",
-            use_container_width=True,
-        )
+        # 3. Parquet
+        with col_parquet:
+            buf_pq = io.BytesIO()
+            df_export.to_parquet(buf_pq, index=False)
+            buf_pq.seek(0)
+            st.download_button(
+                label="📦 Download Parquet",
+                data=buf_pq.getvalue(),
+                file_name="data_gold.parquet",
+                mime="application/octet-stream",
+                key="btn_download_gold_parquet",
+                use_container_width=True,
+            )
+
+        # 4. JSON
+        with col_json:
+            json_bytes = df_export.to_json(orient="records", indent=2).encode("utf-8")
+            st.download_button(
+                label="🔗 Download JSON",
+                data=json_bytes,
+                file_name="data_gold.json",
+                mime="application/json",
+                key="btn_download_gold_json",
+                use_container_width=True,
+            )
 
         st.markdown("---")
 
