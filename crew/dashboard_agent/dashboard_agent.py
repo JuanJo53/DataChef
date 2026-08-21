@@ -28,6 +28,8 @@ from typing import Any
 
 import pandas as pd
 
+from utils.config import model_for
+
 
 # =====================================================================
 # 1. DETECCION DE ROLES DE COLUMNAS  (el corazon "schema-flexible")
@@ -53,10 +55,16 @@ def detect_column_roles(df: pd.DataFrame) -> dict[str, Any]:
                 date_col = col
             continue
 
-        # b) Medida: columna numerica que NO sea un identificador.
-        #    Sumar un 'order_id' no tiene sentido, asi que se ignora.
+        # b) Numeric. Careful: not every numeric column is a MEASURE.
+        #    'Store' holds store ids (1..45) and 'Holiday_Flag' is 0/1: summing
+        #    them means nothing, but grouping BY them does. They used to land in
+        #    measures, leaving the dataset with no dimensions at all, so there
+        #    was nothing to group by and the dashboard could not do "sales by
+        #    store".
         if pd.api.types.is_numeric_dtype(serie):
-            if not _looks_like_id(col):
+            if _is_categorical_numeric(serie):
+                dimensions.append(col)
+            elif not _looks_like_id(col):
                 measures.append(col)
             continue
 
@@ -92,6 +100,34 @@ def _looks_like_id(name: str) -> bool:
     """True si el nombre parece un identificador (no sirve como medida a sumar)."""
     n = name.lower()
     return n == "id" or n.endswith("_id")
+
+
+def _is_categorical_numeric(serie) -> bool:
+    """True if a numeric column actually encodes CATEGORIES.
+
+    Typical case: 'Store' (1..45) or 'Holiday_Flag' (0/1). They are numbers,
+    but summing them means nothing; what is useful is GROUPING by them.
+
+    The criterion is "few distinct values that repeat a lot":
+      - Integers only (a continuous float like Temperature is never a category).
+      - Binary (0/1) -> always a category, it is a flag.
+      - Or <= 50 distinct values AND covering <= 20% of the rows.
+
+    That last ratio is what separates 'Store' (45 distinct across thousands of
+    rows) from a real measure like 'units' (7 distinct across 12 rows), which
+    genuinely is summed.
+    """
+    if not pd.api.types.is_integer_dtype(serie):
+        return False
+    total = int(serie.notna().sum())
+    if total == 0:
+        return False
+    distinct = int(serie.nunique(dropna=True))
+    if distinct <= 1:
+        return False
+    if distinct <= 2:
+        return True
+    return distinct <= 50 and (distinct / total) <= 0.2
 
 
 # =====================================================================
@@ -237,7 +273,13 @@ def build_llm_insights(kpis: list[dict], rule_insights: list[str]) -> list[str] 
         from langchain_google_genai import ChatGoogleGenerativeAI
 
         llm = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash",  # flash = rapido y barato para texto corto
+            # From utils.config: DATACHEF_MODEL_INSIGHTS, then DATACHEF_MODEL,
+            # then a default that is deliberately a DIFFERENT model from the
+            # transformation agent's. Free-tier quota is per model, and these
+            # insights are optional (rules take over if they fail), so viewing
+            # the dashboard repeatedly must not consume the quota the
+            # transformation needs -- that one is critical and blocks the flow.
+            model=model_for("insights"),
             temperature=0.3,
             google_api_key=api_key,
         )
