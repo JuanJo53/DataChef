@@ -143,8 +143,17 @@ def _match_column(phrase: str, columns: tuple[str, ...]) -> str | None:
     return None
 
 
-def _parse_strict(text: str, columns: tuple[str, ...]) -> ChartRequest | None:
-    """Try the strict form. Returns None if the text does not fit it."""
+def _parse_strict(
+    text: str, columns: tuple[str, ...], roles: dict | None = None
+) -> ChartRequest | None:
+    """Try the strict form. Returns None if the text does not fit it.
+
+    ``roles`` lets the two slots be sanity-checked: the grammar reads
+    "MEASURE by DIMENSION", so "top 3 stores by temperature" literally parses
+    as measure=Store, dimension=Temperature -- grammatically right, but
+    backwards, since Store is a category and Temperature is a measure. When the
+    roles are unambiguously inverted the two are swapped.
+    """
     type_match = _TYPE_PATTERN.search(text)
     if not type_match:
         return None
@@ -168,6 +177,11 @@ def _parse_strict(text: str, columns: tuple[str, ...]) -> ChartRequest | None:
         if measure_phrase and measure is None:
             # Named a measure that is not a real column -> drop, do not guess.
             return None
+        if roles and measure is not None:
+            # Swap only when it is unambiguous: the "measure" slot holds a
+            # known dimension AND the "dimension" slot holds a known measure.
+            if measure in roles["dimensions"] and dimension in roles["measures"]:
+                measure, dimension = dimension, measure
     else:
         dimension = _match_column(before_as, columns)
         if dimension is None:
@@ -733,11 +747,14 @@ def interpret_message(text: str, df: pd.DataFrame) -> ChatChartResult:
 
     columns = tuple(str(c) for c in df.columns)
 
-    strict = _parse_strict(message, columns)
+    # Roles are needed by the strict parser too, to catch an inverted
+    # "DIMENSION by MEASURE" phrasing, so they are detected up front.
+    roles = detect_column_roles(df)
+
+    strict = _parse_strict(message, columns, roles)
     if strict is not None:
         return _deliver(df, strict, message)
 
-    roles = detect_column_roles(df)
     measure_priority = roles["measures"]
     measures = frozenset(measure_priority)
     dimensions = tuple(roles["dimensions"])

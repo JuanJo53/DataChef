@@ -393,3 +393,28 @@ def test_the_guided_reply_uses_real_column_names_not_placeholders():
     assert "<column>" not in result.reply
     assert "total amount by region" in result.reply
     assert "no graph" in result.reply
+
+
+def test_strict_syntax_swaps_an_inverted_dimension_and_measure():
+    # The grammar reads "MEASURE by DIMENSION", so "stores by temperature"
+    # literally parses backwards. Roles make the intent unambiguous.
+    df = pd.DataFrame(
+        {
+            "Store": [1, 2, 3] * 20,
+            "Temperature": [20.0 + i for i in range(60)],
+        }
+    )
+    result = interpret_message("top 3 stores by temperature as bar chart", df)
+
+    assert result.chart_request is not None
+    assert result.chart_request.dimension == "Store"
+    assert result.chart_request.measure == "Temperature"
+    assert result.chart_request.top_n == 3
+
+
+def test_strict_syntax_does_not_swap_when_already_correct():
+    result = interpret_message("top 5 amount by region as pie chart", FRAME)
+
+    assert result.chart_request is not None
+    assert result.chart_request.dimension == "region"
+    assert result.chart_request.measure == "amount"
