@@ -1,4 +1,6 @@
+import io
 import os
+import re
 import sys
 
 # Asegurar que el directorio raíz del proyecto esté en sys.path
@@ -6,7 +8,6 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-import re
 import pandas as pd
 import streamlit as st
 
@@ -28,8 +29,6 @@ from ui.charts import render_charts
 from ui.dashboard_chat import render_dashboard_chat
 from ui.ingestion_view import render_ingestion
 from ui.styles import _apply_custom_styles
-
-
 
 
 def _to_gold(df: pd.DataFrame) -> pd.DataFrame:
@@ -120,7 +119,6 @@ def _demo_dataframe():
             ],
         }
     )
-
 
 
 def _render_stage_nav():
@@ -355,6 +353,57 @@ def _render_transform_stage():
         st.subheader("Preview of Transformed (Gold Layer) Data")
         st.dataframe(st.session_state["gold_df"], use_container_width=True)
 
+        # =====================================================================
+        # BLOQUE DE DESCARGA DE DATOS GOLD MULTIFORMATO
+        # =====================================================================
+        st.subheader("📥 Download Transformed Data (Gold Layer)")
+        col_fmt, col_btn = st.columns([1, 2])
+
+        with col_fmt:
+            format_choice = st.selectbox(
+                "Select export format:",
+                options=["CSV", "Parquet", "JSON", "Excel"],
+                key="download_format_selector",
+            )
+
+        buffer = io.BytesIO()
+        df_export = st.session_state["gold_df"]
+
+        if format_choice == "CSV":
+            file_data = df_export.to_csv(index=False).encode("utf-8")
+            file_name = "data_gold.csv"
+            mime_type = "text/csv"
+
+        elif format_choice == "Parquet":
+            df_export.to_parquet(buffer, index=False)
+            file_data = buffer.getvalue()
+            file_name = "data_gold.parquet"
+            mime_type = "application/octet-stream"
+
+        elif format_choice == "JSON":
+            file_data = df_export.to_json(orient="records", indent=2).encode("utf-8")
+            file_name = "data_gold.json"
+            mime_type = "application/json"
+
+        elif format_choice == "Excel":
+            with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+                df_export.to_excel(writer, index=False)
+            file_data = buffer.getvalue()
+            file_name = "data_gold.xlsx"
+            mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+        with col_btn:
+            st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+            st.download_button(
+                label=f"⬇️ Download .{format_choice.lower()} file",
+                data=file_data,
+                file_name=file_name,
+                mime=mime_type,
+                use_container_width=True,
+            )
+
+        st.markdown("---")
+
         st.subheader("Generated Python Script")
         st.code(st.session_state["generated_code"], language="python")
 
@@ -380,17 +429,7 @@ def _render_transform_stage():
 
 @st.cache_data(show_spinner="Building the dashboard...")
 def _cached_dashboard_spec(df: pd.DataFrame) -> dict:
-    """build_dashboard_spec, cached by DataFrame content.
-
-    Without this Streamlit re-runs the whole script on EVERY interaction
-    (including every chat message), and build_dashboard_spec calls Gemini with
-    use_llm=True for the insights. Result: each chat message waited on a fresh
-    LLM round trip -- about 2 minutes, with no loading indicator, and burning
-    free-tier quota for nothing.
-
-    Cached, it is computed ONCE per dataset and later interactions are instant.
-    If the df changes the key changes and it recomputes on its own.
-    """
+    """build_dashboard_spec, cached by DataFrame content."""
     return build_dashboard_spec(df)
 
 
@@ -416,10 +455,6 @@ def _render_dashboard_stage():
 
     df = _to_gold(df)
 
-    # The "What would you like to analyze?" and "Audience" dropdowns used to sit
-    # here. They were removed because they did nothing: their values were only
-    # echoed back in the caption below and never reached the dashboard agent, so
-    # they implied a choice the app could not honour.
     spec = _cached_dashboard_spec(df)
     st.caption(
         f"Analyzed {spec['meta']['rows']} rows x {spec['meta']['columns']} cols"
@@ -465,7 +500,7 @@ def run_app():
     with mid:
         st.image(LOGO_PATH, width="stretch")
     st.markdown(
-    """
+        """
         <p style="
             text-align: center;
             font-family: 'Oxanium', sans-serif;
