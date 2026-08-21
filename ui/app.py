@@ -354,7 +354,7 @@ def _render_transform_stage():
         st.dataframe(st.session_state["gold_df"], use_container_width=True)
 
         # =====================================================================
-        # BLOQUE DE DESCARGA DE DATOS GOLD MULTIFORMATO
+        # BLOQUE DE DESCARGA DE DATOS GOLD MULTIFORMATO (SUBSANADO)
         # =====================================================================
         st.subheader("📥 Download Transformed Data (Gold Layer)")
 
@@ -366,16 +366,16 @@ def _render_transform_stage():
 
         df_export = st.session_state["gold_df"]
 
-        # Generar datos y parámetros según la opción seleccionada actualmente
         if format_choice == "CSV":
             file_data = df_export.to_csv(index=False).encode("utf-8")
             file_name = "data_gold.csv"
             mime_type = "text/csv"
 
         elif format_choice == "Parquet":
-            buffer = io.BytesIO()
-            df_export.to_parquet(buffer, index=False)
-            file_data = buffer.getvalue()
+            buf = io.BytesIO()
+            df_export.to_parquet(buf, index=False)
+            buf.seek(0)
+            file_data = buf.getvalue()
             file_name = "data_gold.parquet"
             mime_type = "application/octet-stream"
 
@@ -385,20 +385,20 @@ def _render_transform_stage():
             mime_type = "application/json"
 
         elif format_choice == "Excel":
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
                 df_export.to_excel(writer, index=False)
-            file_data = buffer.getvalue()
+            buf.seek(0)
+            file_data = buf.getvalue()
             file_name = "data_gold.xlsx"
             mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
-        # Usar key dinámico en el botón de descarga para forzar la actualización en Streamlit
         st.download_button(
             label=f"⬇️ Download {file_name}",
             data=file_data,
             file_name=file_name,
             mime=mime_type,
-            key=f"btn_download_{format_choice.lower()}",
+            key=f"dl_btn_{format_choice}",
             use_container_width=True,
         )
 
