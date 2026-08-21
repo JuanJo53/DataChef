@@ -228,7 +228,8 @@ def test_llm_failure_falls_back_to_the_rule_based_refusal(monkeypatch):
     result = interpret_message("something unparseable", MULTI_DIM_FRAME)
 
     assert result.chart_request is None
-    assert "couldn't match" in result.reply
+    # Falls back to the guided reply, which lists this table's real columns.
+    assert "region" in result.reply and "amount" in result.reply
 
 
 def test_llm_is_not_called_when_the_rules_already_understood(monkeypatch):
@@ -238,3 +239,182 @@ def test_llm_is_not_called_when_the_rules_already_understood(monkeypatch):
 
     assert result.chart_request is not None
     assert fake.models.calls == 0
+
+
+# ---------------------------------------------------------------------
+# Ambiguous / Spanish phrasing, and the time axis
+# ---------------------------------------------------------------------
+TIME_FRAME = pd.DataFrame(
+    {
+        "Store": [1, 2, 3] * 40,
+        "Date": pd.date_range("2010-01-01", periods=120, freq="D"),
+        "Weekly_Sales": [1000.0 + i for i in range(120)],
+        "Temperature": [20.0 + (i % 30) for i in range(120)],
+    }
+)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "quiero ver las ventas totales semanales",
+        "quiero un grafico con las ventas totales semanales",
+        "total sales by week",
+        "weekly sales over time",
+    ],
+)
+def test_weekly_sales_phrasings_all_resolve_without_the_llm(message):
+    # The reported bug: only the phrasing containing "grafico" worked, and only
+    # because it fell through to the LLM. All of these must resolve on rules.
+    result = interpret_message(message, TIME_FRAME)
+
+    assert result.chart_request is not None, message
+    assert result.chart_request.dimension == "Date"
+    assert result.chart_request.measure == "Weekly_Sales"
+    assert result.chart_request.agg == "sum"
+    assert result.chart_request.grain == "week"
+    assert result.chart_request.chart_type == "line"
+
+
+def test_time_axis_drops_top_n_and_defaults_to_a_line():
+    # "top N" is meaningless against a continuous timeline.
+    result = interpret_message("las mayores ventas mensuales", TIME_FRAME)
+
+    assert result.chart_request is not None
+    assert result.chart_request.dimension == "Date"
+    assert result.chart_request.grain == "month"
+    assert result.chart_request.top_n is None
+    assert result.chart_request.chart_type == "line"
+
+
+def test_explicit_chart_type_still_wins_on_a_time_axis():
+    result = interpret_message("ventas mensuales en barras", TIME_FRAME)
+
+    assert result.chart_request is not None
+    assert result.chart_request.chart_type == "bar"
+    assert result.chart_request.grain == "month"
+
+
+def test_spanish_dimension_synonym_resolves():
+    result = interpret_message("ventas por tienda", TIME_FRAME)
+
+    assert result.chart_request is not None
+    assert result.chart_request.dimension == "Store"
+    assert result.chart_request.measure == "Weekly_Sales"
+    assert result.chart_request.grain is None
+
+
+def test_close_spelling_across_languages_resolves():
+    # "temperatura" is not a substring of "Temperature"; only fuzzy matching
+    # bridges the two.
+    result = interpret_message("promedio de temperatura por tienda", TIME_FRAME)
+
+    assert result.chart_request is not None
+    assert result.chart_request.dimension == "Store"
+    assert result.chart_request.measure == "Temperature"
+    assert result.chart_request.agg == "mean"
+
+
+def test_fuzzy_matching_does_not_invent_a_column():
+    # The cutoff must be tight enough that an unrelated word matches nothing.
+    result = interpret_message("quiero ver los helicopteros", TIME_FRAME)
+
+    assert result.chart_request is None
+
+
+def test_grain_is_ignored_when_not_on_the_date_column():
+    result = interpret_message("ventas semanales por tienda", TIME_FRAME)
+
+    assert result.chart_request is not None
+    assert result.chart_request.dimension == "Store"
+    assert result.chart_request.grain is None
+
+
+# ---------------------------------------------------------------------
+# Chart vs. plain answer
+# ---------------------------------------------------------------------
+def test_a_question_is_answered_in_words_without_adding_a_chart():
+    result = interpret_message("what is the total amount", FRAME)
+
+    assert result.chart_request is None      # nothing drawn
+    assert "Total amount" in result.reply
+    assert "450" in result.reply             # 10+20+...+90
+
+
+def test_explicit_no_graph_is_honoured():
+    result = interpret_message("amount by region no graph", FRAME)
+
+    assert result.chart_request is None
+    assert "amount" in result.reply
+
+
+def test_spanish_question_is_answered_without_a_chart():
+    result = interpret_message("cuanto es el total de amount", FRAME)
+
+    assert result.chart_request is None
+    assert "450" in result.reply
+
+
+def test_asking_for_a_chart_still_draws_one():
+    result = interpret_message("quiero un grafico de amount por region", FRAME)
+
+    assert result.chart_request is not None
+    assert result.chart_request.dimension == "region"
+
+
+def test_a_chart_reply_also_reports_the_numbers():
+    # The point of the request: do not make the reader read values off an axis.
+    result = interpret_message("amount by region", FRAME)
+
+    assert result.chart_request is not None
+    assert "Total amount" in result.reply
+    assert "450" in result.reply
+
+
+def test_average_question_answers_with_the_mean():
+    result = interpret_message("what is the average amount", FRAME)
+
+    assert result.chart_request is None
+    assert "Average amount" in result.reply
+    assert "50" in result.reply
+
+
+def test_money_columns_are_formatted_with_a_currency_mark():
+    df = pd.DataFrame({"region": ["a", "b"] * 5, "sales": [100.0] * 10})
+    result = interpret_message("what is the total sales", df)
+
+    assert "$1,000" in result.reply
+
+
+def test_the_guided_reply_uses_real_column_names_not_placeholders():
+    result = interpret_message("what about widgets", MULTI_DIM_FRAME)
+
+    assert result.chart_request is None
+    assert "<column>" not in result.reply
+    assert "total amount by region" in result.reply
+    assert "no graph" in result.reply
+
+
+def test_strict_syntax_swaps_an_inverted_dimension_and_measure():
+    # The grammar reads "MEASURE by DIMENSION", so "stores by temperature"
+    # literally parses backwards. Roles make the intent unambiguous.
+    df = pd.DataFrame(
+        {
+            "Store": [1, 2, 3] * 20,
+            "Temperature": [20.0 + i for i in range(60)],
+        }
+    )
+    result = interpret_message("top 3 stores by temperature as bar chart", df)
+
+    assert result.chart_request is not None
+    assert result.chart_request.dimension == "Store"
+    assert result.chart_request.measure == "Temperature"
+    assert result.chart_request.top_n == 3
+
+
+def test_strict_syntax_does_not_swap_when_already_correct():
+    result = interpret_message("top 5 amount by region as pie chart", FRAME)
+
+    assert result.chart_request is not None
+    assert result.chart_request.dimension == "region"
+    assert result.chart_request.measure == "amount"

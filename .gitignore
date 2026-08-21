@@ -20,8 +20,19 @@ ENV/
 !.streamlit/config.toml
 
 # Local config
+# Secrets: any env file, whatever it is called. Plain ".env" was not enough --
+# stray files like "api1.env" or "GOOGLE_API_KEY=....env" were still committable,
+# and one "git add ." would have published a real key. ".env.example" is kept on
+# purpose: it ends in ".example", so the rule below does not match it.
 .env
+*.env
+!.env.example
+
 prompts/
+
+# Local runtime artifacts, not part of the project
+pipeline_transformacion.py
+pipeline_prueba.py
 
 # Data outputs
 data/

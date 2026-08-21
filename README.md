@@ -46,3 +46,9 @@ pip install -r requirements.txt
 
 - Set `GEMINI_API_KEY` in your environment if you use Gemini integration.
 - Keep raw sample files in `data/raw/` and generated outputs in `data/processed/` or `data/reports/`.
+
+## Documentation
+
+- [Dashboard Chat — how to ask](docs/dashboard-chat.md): what the Stage 4
+  "Ask for a chart" box understands, what it silently ignores, and what it
+  cannot do.
