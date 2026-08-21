@@ -7,6 +7,8 @@ import pandas as pd
 from dotenv import find_dotenv, load_dotenv
 from google import genai
 
+from utils.config import model_for
+
 # Fix para conflictos de asyncio/sockets de Google API en Windows
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -14,17 +16,10 @@ if sys.platform == "win32":
 # Carga automáticamente el archivo .env buscando desde la raíz del proyecto
 load_dotenv(find_dotenv())
 
-# A "lite" ALIAS, not a fixed version. Two reasons:
-#
-# 1. ALIAS, not a version: Google retires old versions. gemini-2.5-flash and
-#    gemini-2.5-flash-lite already return 404. The alias always tracks the
-#    current model, so that error cannot come back.
-# 2. LITE, not regular flash: on the free tier the quota is PER MODEL per day.
-#    gemini-flash-latest points at the newest flash (today gemini-3.7-flash),
-#    which carries the tightest quota: 20 requests/day. That runs out fast,
-#    since one transformation can spend several (each Self-Healing is another
-#    call). The lite family is the cheapest and has the most headroom.
-MODEL = "gemini-flash-lite-latest"
+# The model is NOT hardcoded here any more. It comes from utils.config, which
+# reads DATACHEF_MODEL_TRANSFORM, then DATACHEF_MODEL, then a built-in default.
+# That way each developer picks their own model in their own .env instead of
+# editing (and conflicting over) this line. See utils/config.py.
 
 # Retries ONLY for 503 (server busy). See _is_transient_error.
 API_RETRIES = 3
@@ -62,7 +57,7 @@ def _generate_with_retries(client, contents: str) -> str:
     for attempt in range(1, API_RETRIES + 1):
         try:
             response = client.models.generate_content(
-                model=MODEL,
+                model=model_for("transform"),
                 contents=contents,
             )
             return response.text

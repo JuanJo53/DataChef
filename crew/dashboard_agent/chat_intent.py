@@ -49,6 +49,7 @@ from crew.dashboard_agent.dashboard_agent import (
     _pick_main_measure,
     detect_column_roles,
 )
+from utils.config import model_for
 
 
 @dataclass(frozen=True)
@@ -307,9 +308,10 @@ def _cant_resolve_reply(roles: dict) -> str:
 # =====================================================================
 # 3. LLM FALLBACK (only when the rules did not understand)
 # =====================================================================
-# Cheap model, and a quota pool separate from the transformation agent: this is
-# optional, it must not eat the quota the transformation needs.
-LLM_MODEL = "gemini-3.1-flash-lite"
+# Model comes from utils.config (DATACHEF_MODEL_CHAT, then DATACHEF_MODEL, then
+# a default). The default is deliberately a different model from the
+# transformation agent's: on the free tier quota is per model, and this call is
+# optional, so it must not eat the quota the transformation needs.
 
 
 def _llm_client():
@@ -389,7 +391,9 @@ Rules:
 - No explanations, only the JSON."""
 
     try:
-        response = client.models.generate_content(model=LLM_MODEL, contents=prompt)
+        response = client.models.generate_content(
+            model=model_for("chat"), contents=prompt
+        )
         data = _extract_json(response.text)
     except Exception:
         return None

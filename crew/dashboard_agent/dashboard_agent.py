@@ -28,6 +28,8 @@ from typing import Any
 
 import pandas as pd
 
+from utils.config import model_for
+
 
 # =====================================================================
 # 1. DETECCION DE ROLES DE COLUMNAS  (el corazon "schema-flexible")
@@ -271,12 +273,13 @@ def build_llm_insights(kpis: list[dict], rule_insights: list[str]) -> list[str] 
         from langchain_google_genai import ChatGoogleGenerativeAI
 
         llm = ChatGoogleGenerativeAI(
-            # Modelo DISTINTO al del transformation_agent a proposito: en la capa
-            # gratuita el cupo es por modelo, y estos insights son opcionales (si
-            # fallan, hay fallback por reglas). Separandolos, ver el dashboard
-            # varias veces no consume el cupo que necesita la transformacion, que
-            # si es critica y bloquea el flujo.
-            model="gemini-3.1-flash-lite",
+            # From utils.config: DATACHEF_MODEL_INSIGHTS, then DATACHEF_MODEL,
+            # then a default that is deliberately a DIFFERENT model from the
+            # transformation agent's. Free-tier quota is per model, and these
+            # insights are optional (rules take over if they fail), so viewing
+            # the dashboard repeatedly must not consume the quota the
+            # transformation needs -- that one is critical and blocks the flow.
+            model=model_for("insights"),
             temperature=0.3,
             google_api_key=api_key,
         )
