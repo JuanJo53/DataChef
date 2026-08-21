@@ -239,3 +239,39 @@ if __name__ == "__main__":
 
     print(f"[saved] Reusable pipeline saved to '{output_path}'!")
     return output_path
+# =====================================================================
+# FUNCIÓN PARA EXPORTAR DATOS GOLD A MÚLTIPLES FORMATOS
+# =====================================================================
+def export_gold_dataset(df_gold: pd.DataFrame, output_path_without_ext: str, export_format: str = "csv") -> str:
+    """
+    Exporta el DataFrame procesado (Gold) al formato solicitado.
+    
+    Formatos soportados: 'csv', 'parquet', 'json', 'excel' (xlsx).
+    Retorna la ruta completa del archivo generado.
+    """
+    fmt = export_format.lower().strip()
+    
+    if fmt == "csv":
+        full_path = f"{output_path_without_ext}.csv"
+        df_gold.to_csv(full_path, index=False)
+        
+    elif fmt == "parquet":
+        full_path = f"{output_path_without_ext}.parquet"
+        df_gold.to_parquet(full_path, index=False)
+        
+    elif fmt == "json":
+        full_path = f"{output_path_without_ext}.json"
+        df_gold.to_json(full_path, orient="records", indent=2)
+        
+    elif fmt in ["excel", "xlsx"]:
+        full_path = f"{output_path_without_ext}.xlsx"
+        df_gold.to_excel(full_path, index=False)
+        
+    else:
+        raise ValueError(
+            f"Formato '{export_format}' no soportado. "
+            f"Formatos válidos: 'csv', 'parquet', 'json', 'excel'"
+        )
+        
+    print(f"[export] Dataset Gold guardado exitosamente como: {full_path}")
+    return full_path
