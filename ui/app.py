@@ -34,10 +34,24 @@ from ui.styles import _apply_custom_styles
 
 def _to_gold(df: pd.DataFrame) -> pd.DataFrame:
     """Prep mínima hacia la capa 'gold': tipa fechas y números."""
+
     df = df.copy()
+
+    # ==========================================
+    # DATE COLUMNS
+    # ==========================================
+
     for col in df.columns:
         if "date" in col.lower():
-            df[col] = pd.to_datetime(df[col], errors="coerce")
+            df[col] = pd.to_datetime(
+                df[col],
+                errors="coerce",
+                dayfirst=True,
+            )
+
+    # ==========================================
+    # TEXT -> NUMERIC CANDIDATES
+    # ==========================================
 
     text_cols = [
         c
@@ -46,11 +60,26 @@ def _to_gold(df: pd.DataFrame) -> pd.DataFrame:
         and not pd.api.types.is_datetime64_any_dtype(df[c])
         and not pd.api.types.is_bool_dtype(df[c])
     ]
+
     for col in text_cols:
-        limpio = df[col].astype(str).str.replace(r"[$,%\s]", "", regex=True)
-        convertido = pd.to_numeric(limpio, errors="coerce")
+        limpio = (
+            df[col]
+            .astype(str)
+            .str.replace(
+                r"[$,%\s]",
+                "",
+                regex=True,
+            )
+        )
+
+        convertido = pd.to_numeric(
+            limpio,
+            errors="coerce",
+        )
+
         if convertido.notna().mean() >= 0.8:
             df[col] = convertido
+
     return df
 
 

@@ -80,21 +80,76 @@ def _sql_type(serie: pd.Series) -> str:
             return f"NVARCHAR({cota})"
     return "NVARCHAR(MAX)"
 
+def _looks_like_date_series(serie: pd.Series) -> bool:
+    """
+    Detecta si una columna de texto parece contener fechas.
 
-def _is_pii(name: str, serie: pd.Series) -> bool:
-    """PII por nombre de columna o por valores (emails / telefonos)."""
-    if any(w in name.lower() for w in _PII_WORDS):
-        return True
-    # El chequeo por valor solo aplica a texto: evita falsos positivos donde
-    # una fecha ('2024-01-03') o un numero se confunde con un telefono.
+    Evita falsos positivos de PII cuando valores como
+    05-02-2010 coinciden accidentalmente con el regex de teléfono.
+    """
+
     if not _is_text_series(serie):
         return False
-    muestra = serie.dropna().astype(str).head(20)
+
+    sample = (
+        serie
+        .dropna()
+        .astype(str)
+        .head(50)
+    )
+
+    if sample.empty:
+        return False
+
+    parsed = pd.to_datetime(
+        sample,
+        errors="coerce",
+        dayfirst=True,
+    )
+
+    success_rate = parsed.notna().mean()
+
+    return success_rate >= 0.8
+
+
+def _is_pii(name: str, serie: pd.Series) -> bool:
+    """Detecta PII por nombre de columna o por valores."""
+
+    # PII por nombre de columna
+    if any(w in name.lower() for w in _PII_WORDS):
+        return True
+
+    # Solo analizamos valores si es texto
+    if not _is_text_series(serie):
+        return False
+
+    # Evitar que fechas como 05-02-2010
+    # sean detectadas como teléfonos
+    if _looks_like_date_series(serie):
+        return False
+
+    muestra = (
+        serie
+        .dropna()
+        .astype(str)
+        .head(20)
+    )
+
     if muestra.empty:
         return False
-    hits = sum(bool(_EMAIL_RE.search(v) or _PHONE_RE.search(v)) for v in muestra)
-    return hits >= max(3, len(muestra) // 2)
 
+    hits = sum(
+        bool(
+            _EMAIL_RE.search(v)
+            or _PHONE_RE.search(v)
+        )
+        for v in muestra
+    )
+
+    return hits >= max(
+        3,
+        len(muestra) // 2,
+    )
 
 # =====================================================================
 # 1. PERFIL por columna
@@ -124,56 +179,229 @@ def profile_columns(df: pd.DataFrame) -> list[dict]:
 # =====================================================================
 # 2. SALUD del dato
 # =====================================================================
-def compute_health(df: pd.DataFrame, perfil: list[dict]) -> dict:
-    total_celdas = df.size or 1
-    nulos_totales = sum(c["nulls"] for c in perfil)
-    completitud = (1 - nulos_totales / total_celdas) * 100
+def compute_health(
+    df: pd.DataFrame,
+    perfil: list[dict],
+) -> dict:
+    """
+    Calcula la salud general del dataset usando varias dimensiones:
 
-    dup = int(df.duplicated().sum())
-    unicidad = (1 - dup / len(df)) * 100 if len(df) else 100
+    - Completeness
+    - Uniqueness
+    - Column quality
+    - Privacy
+    """
 
-    cols_con_problemas = sum(1 for c in perfil if c["null_pct"] > 0)
-    cols_pii = [c["name"] for c in perfil if c["is_pii"]]
+    # =====================================================
+    # 1. COMPLETENESS
+    # =====================================================
 
-    # Score ponderado (completitud + unicidad).
-    score = round(0.6 * completitud + 0.4 * unicidad)
-    grado = "A" if score >= 90 else "B" if score >= 75 else "C" if score >= 60 else "D"
+    total_cells = df.size or 1
+
+    total_nulls = sum(
+        c["nulls"]
+        for c in perfil
+    )
+
+    completeness = (
+        1 - total_nulls / total_cells
+    ) * 100
+
+
+    # =====================================================
+    # 2. UNIQUENESS
+    # =====================================================
+
+    duplicate_rows = int(
+        df.duplicated().sum()
+    )
+
+    if len(df):
+        uniqueness = (
+            1 - duplicate_rows / len(df)
+        ) * 100
+    else:
+        uniqueness = 100.0
+
+
+    # =====================================================
+    # 3. COLUMN QUALITY
+    # =====================================================
+
+    columns_with_nulls = sum(
+        1
+        for c in perfil
+        if c["nulls"] > 0
+    )
+
+    total_columns = len(perfil) or 1
+
+    column_quality = (
+        1 - columns_with_nulls / total_columns
+    ) * 100
+
+
+    # =====================================================
+    # 4. PRIVACY
+    # =====================================================
+
+    pii_columns = [
+        c["name"]
+        for c in perfil
+        if c["is_pii"]
+    ]
+
+    if not pii_columns:
+        privacy_score = 100.0
+    else:
+        privacy_score = max(
+            0.0,
+            100.0 - len(pii_columns) * 25,
+        )
+
+
+    # =====================================================
+    # 5. FINAL SCORE
+    # =====================================================
+
+    score = round(
+        0.35 * completeness
+        + 0.25 * uniqueness
+        + 0.25 * column_quality
+        + 0.15 * privacy_score
+    )
+
+    if score >= 90:
+        grade = "A"
+    elif score >= 75:
+        grade = "B"
+    elif score >= 60:
+        grade = "C"
+    else:
+        grade = "D"
+
 
     return {
         "score": score,
-        "grade": grado,
-        "completeness_pct": round(completitud, 1),
-        "uniqueness_pct": round(unicidad, 1),
-        "duplicate_rows": dup,
-        "columns_with_issues": cols_con_problemas,
-        "pii_columns": cols_pii,
+        "grade": grade,
+
+        "completeness_pct": round(
+            completeness,
+            1,
+        ),
+
+        "uniqueness_pct": round(
+            uniqueness,
+            1,
+        ),
+
+        "column_quality_pct": round(
+            column_quality,
+            1,
+        ),
+
+        "privacy_score": round(
+            privacy_score,
+            1,
+        ),
+
+        "duplicate_rows": duplicate_rows,
+
+        "columns_with_nulls": (
+            columns_with_nulls
+        ),
+
+        "pii_columns": pii_columns,
     }
 
+def build_cards(
+    df: pd.DataFrame,
+    health: dict,
+) -> list[dict]:
+    """Tarjetas resumidas para la UI."""
 
-def build_cards(df: pd.DataFrame, health: dict) -> list[dict]:
-    """Tarjetas resumidas para la UI. status: good / warn / bad."""
     def estado(cond_ok, cond_warn):
-        return "good" if cond_ok else "warn" if cond_warn else "bad"
+        return (
+            "good"
+            if cond_ok
+            else "warn"
+            if cond_warn
+            else "bad"
+        )
 
     return [
-        {"label": "Health score", "value": f"{health['score']}/100 ({health['grade']})",
-         "status": estado(health["score"] >= 90, health["score"] >= 60),
-         "detail": "Weighted completeness + uniqueness."},
-        {"label": "Completeness", "value": f"{health['completeness_pct']}%",
-         "status": estado(health["completeness_pct"] >= 98, health["completeness_pct"] >= 90),
-         "detail": "Share of non-null cells."},
-        {"label": "Duplicate rows", "value": health["duplicate_rows"],
-         "status": estado(health["duplicate_rows"] == 0, health["duplicate_rows"] <= 2),
-         "detail": "Fully duplicated rows."},
-        {"label": "Cols with nulls", "value": health["columns_with_issues"],
-         "status": estado(health["columns_with_issues"] == 0, health["columns_with_issues"] <= 2),
-         "detail": "Columns containing missing values."},
-        {"label": "PII columns", "value": len(health["pii_columns"]),
-         "status": estado(len(health["pii_columns"]) == 0, True),
-         "detail": ", ".join(health["pii_columns"]) or "No obvious PII detected."},
+        {
+            "label": "Health score",
+            "value": (
+                f"{health['score']}/100 "
+                f"({health['grade']})"
+            ),
+            "status": estado(
+                health["score"] >= 90,
+                health["score"] >= 75,
+            ),
+            "detail": (
+                "Weighted data-quality score."
+            ),
+        },
+
+        {
+            "label": "Completeness",
+            "value": (
+                f"{health['completeness_pct']}%"
+            ),
+            "status": estado(
+                health["completeness_pct"] >= 98,
+                health["completeness_pct"] >= 90,
+            ),
+            "detail": (
+                "Share of non-null cells."
+            ),
+        },
+
+        {
+            "label": "Duplicate rows",
+            "value": health["duplicate_rows"],
+            "status": estado(
+                health["duplicate_rows"] == 0,
+                health["duplicate_rows"] <= 2,
+            ),
+            "detail": (
+                "Fully duplicated rows."
+            ),
+        },
+
+        {
+            "label": "Cols with nulls",
+            "value": (
+                health["columns_with_nulls"]
+            ),
+            "status": estado(
+                health["columns_with_nulls"] == 0,
+                health["columns_with_nulls"] <= 2,
+            ),
+            "detail": (
+                "Columns containing missing values."
+            ),
+        },
+
+        {
+            "label": "PII columns",
+            "value": len(
+                health["pii_columns"]
+            ),
+            "status": estado(
+                len(health["pii_columns"]) == 0,
+                len(health["pii_columns"]) <= 1,
+            ),
+            "detail": (
+                ", ".join(
+                    health["pii_columns"]
+                )
+                or "No obvious PII detected."
+            ),
+        },
     ]
-
-
 # =====================================================================
 # 3. ISSUES detectados
 # =====================================================================
