@@ -354,11 +354,11 @@ def _render_transform_stage():
         st.dataframe(st.session_state["gold_df"], use_container_width=True)
 
         # =====================================================================
-        # BLOQUE DE DESCARGA DE DATOS GOLD MULTIFORMATO
+        # BLOQUE DE DESCARGA DE DATOS GOLD MULTIFORMATO (SANITISADO)
         # =====================================================================
         st.subheader("📥 Download Transformed Data (Gold Layer)")
 
-        df_export = st.session_state["gold_df"]
+        df_export = st.session_state["gold_df"].copy()
 
         col_csv, col_xlsx, col_parquet, col_json = st.columns(4)
 
@@ -389,10 +389,23 @@ def _render_transform_stage():
                 use_container_width=True,
             )
 
-        # 3. Parquet
+        # 3. Parquet (Con sanitización previa para PyArrow)
         with col_parquet:
             buf_pq = io.BytesIO()
-            df_export.to_parquet(buf_pq, index=False)
+            df_parquet = df_export.copy()
+            
+            # Sanitizar columnas de tipo object para evitar crash en PyArrow
+            for c in df_parquet.select_dtypes(include=["object"]).columns:
+                converted = pd.to_numeric(
+                    df_parquet[c].astype(str).str.replace(r"[$,%\s]", "", regex=True),
+                    errors="coerce",
+                )
+                if converted.notna().sum() > 0:
+                    df_parquet[c] = converted
+                else:
+                    df_parquet[c] = df_parquet[c].astype(str)
+
+            df_parquet.to_parquet(buf_pq, index=False)
             buf_pq.seek(0)
             st.download_button(
                 label="📦 Download Parquet",
