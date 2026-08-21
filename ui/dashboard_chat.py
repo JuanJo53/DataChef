@@ -11,6 +11,7 @@ panel writes, and each chat chart gets its own type dropdown, exactly like the
 automatic ones.
 """
 
+import pandas as pd
 import plotly.express as px
 import streamlit as st
 
@@ -34,16 +35,47 @@ def _shared_color() -> str:
     return st.session_state.get(_SHARED_COLOR_KEY, _DEFAULT_COLOR)
 
 
+# pandas resample aliases for each requested bucket size.
+_GRAIN_FREQ = {"day": "D", "week": "W", "month": "MS", "quarter": "QS", "year": "YS"}
+
+
+def _bucket_dates(df, request: ChartRequest):
+    """Round the date column down to the requested bucket, if any.
+
+    "ventas totales semanales" means weekly totals; without this the chart would
+    show one point per calendar day and simply be mislabelled. Grouping happens
+    afterwards on the bucketed value, so the existing _aggregate is untouched.
+    """
+    freq = _GRAIN_FREQ.get(request.grain or "")
+    if not freq or request.dimension not in df.columns:
+        return df
+    column = df[request.dimension]
+    if not pd.api.types.is_datetime64_any_dtype(column):
+        return df
+    bucketed = df.copy()
+    bucketed[request.dimension] = column.dt.to_period(freq[0]).dt.start_time
+    return bucketed
+
+
 def _render_chart(df, request: ChartRequest, chart_type: str, color: str, key: str) -> None:
     spec = request.to_spec()
-    data = _aggregate(df, spec)
+    data = _aggregate(_bucket_dates(df, request), spec)
     # Y is "count" on counting charts, or the real measure.
     ycol = "count" if (spec.get("agg") == "count" or spec.get("y") is None) else spec["y"]
 
+    is_date_axis = pd.api.types.is_datetime64_any_dtype(data[request.dimension])
+
+    # A time axis must stay in chronological order. _aggregate only sorts by x
+    # for "line", so a timeline the user asked to see as bars would otherwise
+    # come back ordered by value.
+    if is_date_axis:
+        data = data.sort_values(request.dimension)
+
     # A numeric dimension (e.g. Store = 1..45) is a CATEGORY, not a scale.
     # Without this Plotly draws a continuous axis and the 5 bars of a "top 5"
-    # end up thin and spread across the whole numeric range.
-    categorical = chart_type in ("bar", "pie")
+    # end up thin and spread across the whole numeric range. Dates are exempt:
+    # they are a real continuous axis and Plotly formats them properly.
+    categorical = chart_type in ("bar", "pie") and not is_date_axis
     if categorical:
         data = data.copy()
         data[request.dimension] = data[request.dimension].astype(str)
@@ -60,9 +92,11 @@ def _render_chart(df, request: ChartRequest, chart_type: str, color: str, key: s
     else:
         fig = px.bar(data, x=request.dimension, y=ycol,
                      color_discrete_sequence=[color])
-        # Plotly still reads "16" as a number and would revert to a continuous
-        # axis even though the data is text, so declare the axis categorical.
-        fig.update_xaxes(type="category")
+        if categorical:
+            # Plotly still reads "16" as a number and would revert to a
+            # continuous axis even though the data is text, so declare the axis
+            # categorical. Not applied to dates, which have a proper date axis.
+            fig.update_xaxes(type="category")
     st.plotly_chart(fig, use_container_width=True, key=key)
 
 
