@@ -357,7 +357,7 @@ def _render_transform_stage():
         # BLOQUE DE DESCARGA DE DATOS GOLD MULTIFORMATO
         # =====================================================================
         st.subheader("📥 Download Transformed Data (Gold Layer)")
-        
+
         format_choice = st.selectbox(
             "Select export format:",
             options=["CSV", "Parquet", "JSON", "Excel"],
@@ -401,3 +401,132 @@ def _render_transform_stage():
             key=f"btn_download_{format_choice.lower()}",
             use_container_width=True,
         )
+
+        st.markdown("---")
+
+        st.subheader("Generated Python Script")
+        st.code(st.session_state["generated_code"], language="python")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button(
+                "📄 Export Reusable Pipeline (.py)", use_container_width=True
+            ):
+                path = save_pipeline_script(
+                    st.session_state["generated_code"],
+                    "pipeline_transformacion.py",
+                )
+                st.success(f"Pipeline saved to `{path}`!")
+
+        with col2:
+            if st.button(
+                "📊 Build Dashboard", type="primary", use_container_width=True
+            ):
+                st.session_state["stage"] = 3
+                st.session_state["dashboard_ready"] = True
+                st.rerun()
+
+
+@st.cache_data(show_spinner="Building the dashboard...")
+def _cached_dashboard_spec(df: pd.DataFrame) -> dict:
+    """build_dashboard_spec, cached by DataFrame content."""
+    return build_dashboard_spec(df)
+
+
+def _render_dashboard_stage():
+    st.header("Stage 4: Dashboard and insights")
+    st.markdown(
+        "The dashboard agent turns the cleaned (gold) data into KPIs, charts and business insights."
+    )
+
+    if not st.session_state["dashboard_ready"]:
+        st.info(
+            "Complete the previous stages to generate the dashboard. The agent is ready once the transformed data is approved."
+        )
+        return
+
+    df = st.session_state.get("gold_df")
+    if df is None:
+        df = st.session_state.get("raw_df")
+
+    if df is None or df.empty:
+        st.warning("No data available. Load a dataset in Stage 1 first.")
+        return
+
+    df = _to_gold(df)
+
+    spec = _cached_dashboard_spec(df)
+    st.caption(
+        f"Analyzed {spec['meta']['rows']} rows x {spec['meta']['columns']} cols"
+    )
+
+    render_charts({"spec": spec, "data": df})
+
+    table = re.sub(
+        r"\W+",
+        "_",
+        str(st.session_state.get("uploaded_file") or "DataChef"),
+    ).strip("_")
+
+    with st.expander("📤  Export to Power BI (DAX measures)"):
+        pkg = to_powerbi(spec, table_name=table)
+        st.code("\n".join(pkg["dax_measures"]), language="dax")
+        if pkg["relationships"]:
+            st.caption("Suggested relationships:")
+            for r in pkg["relationships"]:
+                st.markdown(
+                    f"- `{r['from']}` → `{r['to']}` ({r['cardinality']}, {r['cross_filter']})"
+                )
+
+    with st.expander("📤  Export to Tableau"):
+        res = to_tableau(spec)
+        st.info(f"Status: {res['status']} — {res['reason']}")
+
+    st.divider()
+    render_dashboard_chat(df)
+
+
+def run_app():
+    st.set_page_config(page_title="DataChef", page_icon=LOGO_PATH, layout="wide")
+
+    with st.sidebar:
+        st.image(LOGO_PATH, width=200)
+
+    _init_state()
+    _render_stage_nav()
+    _apply_custom_styles()
+
+    _, mid, _ = st.columns([1, 2, 1])
+    with mid:
+        st.image(LOGO_PATH, width="stretch")
+    st.markdown(
+        """
+        <p style="
+            text-align: center;
+            font-family: 'Oxanium', sans-serif;
+            font-size: 25px;
+            font-weight: 500;
+            color: #B9B7D0;
+            letter-spacing: 1px;
+            margin-top: -12px;
+            margin-bottom: 8px;
+        ">
+            Agentic workflow for ingestion, transformation, and dashboarding
+        </p>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    stage = st.session_state["stage"]
+    if stage == 0:
+        _render_upload_stage()
+    elif stage == 1:
+        _render_diagnose_stage()
+    elif stage == 2:
+        _render_transform_stage()
+    else:
+        _render_dashboard_stage()
+
+
+if __name__ == "__main__":
+    run_app()
