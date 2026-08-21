@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Callable
 
 import pandas as pd
 
 from datachef.contracts import (
     CastColumnParameters,
+    ComputeColumnParameters,
+    ComputeOperator,
     DropColumnParameters,
     ImputeMissingParameters,
     ImputeStrategy,
@@ -203,6 +206,7 @@ def _deduplicate_by_keys(
 # caller supplies, so the operation stays inside the allow-list.
 _CURRENCY_SYMBOLS = frozenset("$€£¥₹₩₽")
 _THOUSANDS_SEPARATORS = frozenset(",_")
+_ACCOUNTING_NUMBER = re.compile(r"\+?(?:\d+(?:\.\d*)?|\.\d+)")
 
 
 def _strip_numeric_noise(
@@ -214,6 +218,13 @@ def _strip_numeric_noise(
     if not isinstance(value, str):
         return value
     text = value
+    if parameters.strip_whitespace:
+        text = text.strip()
+    accounting_negative = text.startswith("(") and text.endswith(")")
+    if accounting_negative:
+        text = text[1:-1]
+        if parameters.strip_whitespace:
+            text = text.strip()
     if parameters.strip_currency_symbols:
         text = "".join(
             character for character in text if character not in _CURRENCY_SYMBOLS
@@ -224,6 +235,14 @@ def _strip_numeric_noise(
         )
     if parameters.strip_whitespace:
         text = text.strip()
+    if accounting_negative:
+        if _ACCOUNTING_NUMBER.fullmatch(text):
+            text = "-" + text.removeprefix("+")
+        else:
+            # Preserve an invalid accounting token as invalid text. The next
+            # cast therefore fails its value-preservation gate instead of
+            # inventing a number (especially never zero).
+            text = f"({text})"
     return text
 
 
@@ -311,6 +330,33 @@ def _impute_missing(
     )
 
 
+def _compute_column(
+    dataframe: pd.DataFrame,
+    operation: TransformationOperation,
+) -> OperationEffect:
+    parameters = operation.parameters
+    assert isinstance(parameters, ComputeColumnParameters)
+    left = dataframe[parameters.left_column]
+    right = dataframe[parameters.right_column]
+    if parameters.operator is ComputeOperator.DIVIDE:
+        if bool(right.eq(0).fillna(False).any()):
+            raise ValueError("division by zero is not allowed")
+        result = left / right
+    elif parameters.operator is ComputeOperator.ADD:
+        result = left + right
+    elif parameters.operator is ComputeOperator.SUBTRACT:
+        result = left - right
+    elif parameters.operator is ComputeOperator.MULTIPLY:
+        result = left * right
+    else:  # pragma: no cover - closed enum
+        raise ValueError("unsupported compute operator")
+    dataframe[parameters.output_column] = result
+    return OperationEffect(
+        dataframe=dataframe,
+        affected_cell_count=int(len(dataframe)),
+    )
+
+
 OPERATION_CATALOGUE: dict[OperationType, OperationDefinition] = {
     OperationType.TRIM_WHITESPACE: OperationDefinition(
         OperationType.TRIM_WHITESPACE,
@@ -372,6 +418,13 @@ OPERATION_CATALOGUE: dict[OperationType, OperationDefinition] = {
         OperationType.NORMALIZE_NUMERIC_TEXT,
         NormalizeNumericTextParameters,
         _normalize_numeric_text,
+        material=True,
+        may_drop_rows=False,
+    ),
+    OperationType.COMPUTE_COLUMN: OperationDefinition(
+        OperationType.COMPUTE_COLUMN,
+        ComputeColumnParameters,
+        _compute_column,
         material=True,
         may_drop_rows=False,
     ),

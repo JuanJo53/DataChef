@@ -129,6 +129,8 @@ def test_pass_run_produces_a_handoff_from_the_legacy_rule_based_builder() -> Non
     assert context.qa_report_id == state.qa_report.qa_report_id
     assert context.downstream_use is DownstreamUse.ANALYSIS
     assert context.authored_questions == (AUTHORED_QUESTION,)
+    assert len(context.question_resolutions) == 1
+    assert context.question_resolutions[0].status.value == "RESOLVED"
     spec = handoff.dashboard_spec()
     assert spec["engine"] == "rule-based"
     assert spec["meta"] == {"rows": 3, "columns": 4}
@@ -254,6 +256,30 @@ def test_handoff_identity_tracks_the_verified_result() -> None:
     assert first.context.handoff_id == repeated.context.handoff_id
     assert first.context.handoff_id != second.context.handoff_id
     assert first.context.result_fingerprint != second.context.result_fingerprint
+
+
+def test_handoff_identity_tracks_questions_even_when_gold_is_unchanged() -> None:
+    first_controller = _controller()
+    first_controller.submit_intent(_intent(questions=("Show total amount by region",)), ())
+    first_controller.prepare_plan(command_id="plan")
+    first_controller.record_human_decision(HumanDecision.APPROVE, command_id="approve")
+    first_controller.execute_current_plan(command_id="execute")
+    second_controller = _controller()
+    second_controller.submit_intent(
+        _intent(questions=("Show the distribution of amount",)), ()
+    )
+    second_controller.prepare_plan(command_id="plan")
+    second_controller.record_human_decision(HumanDecision.APPROVE, command_id="approve")
+    second_controller.execute_current_plan(command_id="execute")
+
+    first = first_controller.build_dashboard_handoff()
+    second = second_controller.build_dashboard_handoff()
+
+    assert isinstance(first, DashboardHandoff)
+    assert isinstance(second, DashboardHandoff)
+    assert first.context.result_fingerprint == second.context.result_fingerprint
+    assert first.context.handoff_id != second.context.handoff_id
+    assert first.context.question_resolutions != second.context.question_resolutions
 
 
 def test_controller_forwards_only_the_selected_suggested_questions() -> None:

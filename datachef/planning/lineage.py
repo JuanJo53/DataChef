@@ -37,6 +37,14 @@ class ColumnLineage:
         del self._original_to_current[original]
         return True
 
+    def add(self, current: str) -> bool:
+        """Record one derived column so later ordered operations can reference it."""
+
+        if current in self.current_columns or current in self._original_to_current:
+            return False
+        self._original_to_current[current] = current
+        return True
+
     def original_for_current(self, current: str) -> str | None:
         return next(
             (

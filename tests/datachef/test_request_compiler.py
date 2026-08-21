@@ -22,6 +22,8 @@ from datachef.application import (
 )
 from datachef.application.request_compiler import compile_requests, measure_columns
 from datachef.contracts import (
+    CastColumnParameters,
+    CastTarget,
     DownstreamUse,
     DropColumnParameters,
     HumanDecision,
@@ -1369,6 +1371,253 @@ def test_a_single_loose_word_never_renames_a_column() -> None:
     assert compile_requests("drop the month column", frame, report) == ()
 
 
+@pytest.mark.parametrize(
+    "objective",
+    (
+        "if best seller has only one value drop the column",
+        "if best seller has a single distinct value drop it",
+        "if best seller is constant drop it",
+        "if best seller contains only one distinct value drop it",
+    ),
+)
+def test_single_distinct_value_condition_compiles_a_grounded_drop(objective) -> None:
+    frame = pd.DataFrame(
+        {"isBestSeller": [False, False, False], "price": [10.0, 20.0, 30.0]}
+    )
+
+    requests = _compile(objective, frame)
+
+    assert [
+        (request.operation_type, request.target_columns) for request in requests
+    ] == [(OperationType.DROP_COLUMN, ("isBestSeller",))]
+    assert measure_columns(frame)["isBestSeller"].unique_count == 1
+
+
+def test_single_distinct_value_condition_does_not_drop_a_varying_column() -> None:
+    frame = pd.DataFrame(
+        {"isBestSeller": [False, True, False], "price": [10.0, 20.0, 30.0]}
+    )
+
+    assert _compile(
+        "if best seller has only one value drop the column",
+        frame,
+    ) == ()
+
+
+def test_single_distinct_condition_requires_exactly_one_not_zero_distinct_values() -> None:
+    from datachef.application.request_compiler import compile_objective
+
+    frame = pd.DataFrame({"empty": [None, None, None], "varying": [1, 2, 3]})
+    report = diagnose_raw_dataframe(frame)
+
+    result = compile_objective(
+        "Drop empty if it has one distinct value",
+        frame,
+        report,
+    )
+
+    assert result.requests == ()
+    assert result.conditional_drop_exclusions == ("empty",)
+    assert any(
+        finding.code == "CONDITIONAL_DROP_NOT_MET" and not finding.blocking
+        for finding in result.findings
+    )
+
+
+@pytest.mark.parametrize(
+    ("values", "expected_drop"),
+    [
+        (["one", "two", "one"], True),
+        (["one", "one", "one"], False),
+        ([None, None, None], False),
+    ],
+)
+def test_more_than_one_distinct_value_condition_uses_its_own_predicate(
+    values, expected_drop
+) -> None:
+    from datachef.application.request_compiler import compile_objective
+
+    frame = pd.DataFrame({"isBestSeller": values, "price": [1, 2, 3]})
+    report = diagnose_raw_dataframe(frame)
+
+    result = compile_objective(
+        "Drop best seller if it has more than one distinct value.",
+        frame,
+        report,
+    )
+
+    drops = tuple(
+        request.target_columns[0]
+        for request in result.requests
+        if request.operation_type is OperationType.DROP_COLUMN
+    )
+    assert ("isBestSeller" in drops) is expected_drop
+    if not expected_drop:
+        assert result.conditional_drop_exclusions == ("isBestSeller",)
+
+
+def test_generic_single_distinct_condition_enumerates_only_exact_matches() -> None:
+    from datachef.application.request_compiler import compile_objective
+
+    frame = pd.DataFrame(
+        {
+            "constant_a": [1, 1, 1],
+            "varying": [1, 2, 3],
+            "constant_b": ["x", "x", "x"],
+            "empty": [None, None, None],
+        }
+    )
+    report = diagnose_raw_dataframe(frame)
+
+    result = compile_objective(
+        "If there are columns with one distinct value, drop them",
+        frame,
+        report,
+    )
+
+    assert [request.target_columns for request in result.requests] == [
+        ("constant_a",),
+        ("constant_b",),
+    ]
+    assert result.conditional_drop_exclusions == ("varying", "empty")
+
+
+def test_generic_single_distinct_condition_never_drops_every_column() -> None:
+    from datachef.application.request_compiler import compile_objective
+
+    frame = pd.DataFrame({"a": [1, 1], "b": ["x", "x"]})
+    report = diagnose_raw_dataframe(frame)
+
+    result = compile_objective(
+        "If there are columns with one distinct value, drop them",
+        frame,
+        report,
+    )
+
+    assert result.requests == ()
+    assert any(
+        finding.code == "CONDITIONAL_DROP_ALL_COLUMNS" and finding.blocking
+        for finding in result.findings
+    )
+
+
+def test_generic_single_distinct_condition_with_no_matches_is_visible_nonblocking() -> None:
+    from datachef.application.request_compiler import compile_objective
+
+    frame = pd.DataFrame({"a": [1, 2], "b": ["x", "y"]})
+    report = diagnose_raw_dataframe(frame)
+
+    result = compile_objective(
+        "If there are columns with one distinct value, drop them",
+        frame,
+        report,
+    )
+
+    assert result.requests == ()
+    assert result.conditional_drop_exclusions == ("a", "b")
+    assert [(item.code, item.blocking) for item in result.findings] == [
+        ("CONDITIONAL_DROP_NOT_MET", False)
+    ]
+
+
+def test_generic_single_distinct_condition_respects_required_and_protected_columns() -> None:
+    from datachef.application.request_compiler import compile_objective
+
+    frame = pd.DataFrame(
+        {
+            "required_constant": [1, 1],
+            "protected_constant": [2, 2],
+            "safe_constant": [3, 3],
+            "varying": [1, 2],
+        }
+    )
+    report = diagnose_raw_dataframe(frame)
+
+    result = compile_objective(
+        "If there are columns with one distinct value, drop them",
+        frame,
+        report,
+        required_columns=("required_constant",),
+        protected_columns=("protected_constant",),
+    )
+
+    assert [request.target_columns for request in result.requests] == [
+        ("safe_constant",)
+    ]
+    assert {"required_constant", "protected_constant", "varying"}.issubset(
+        result.conditional_drop_exclusions
+    )
+    assert any(
+        item.code == "CONDITIONAL_DROP_COLUMN_PROTECTED" and item.blocking
+        for item in result.findings
+    )
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        ([0, 0, 0, 1, None], True),
+        ([0, 1, 2, 3, None], False),
+    ],
+)
+def test_nulls_or_zeroes_condition_uses_combined_affected_percentage(
+    values, expected
+) -> None:
+    from datachef.application.request_compiler import compile_objective
+
+    frame = pd.DataFrame({"boughtInLastMonth": values, "row_id": range(5)})
+    report = diagnose_raw_dataframe(frame)
+
+    result = compile_objective(
+        "If boughtInLastMonth has over 40% nulls or zeroes drop the column",
+        frame,
+        report,
+    )
+
+    drops = tuple(
+        request.target_columns
+        for request in result.requests
+        if request.operation_type is OperationType.DROP_COLUMN
+    )
+    assert bool(drops) is expected
+    if not expected:
+        assert result.conditional_drop_exclusions == ("boughtInLastMonth",)
+        assert any(
+            item.code == "CONDITIONAL_DROP_NOT_MET" and not item.blocking
+            for item in result.findings
+        )
+
+
+@pytest.mark.parametrize("policy", ("target", "required", "protected"))
+def test_single_distinct_value_condition_cannot_drop_bound_columns(policy) -> None:
+    from datachef.application.request_compiler import compile_objective
+
+    frame = pd.DataFrame(
+        {"isBestSeller": [False, False], "price": [10.0, 20.0]}
+    )
+    report = diagnose_raw_dataframe(frame)
+    objective = (
+        "Train a model to predict isBestSeller. "
+        "If best seller has only one value drop the column"
+        if policy == "target"
+        else "If best seller has only one value drop the column"
+    )
+
+    result = compile_objective(
+        objective,
+        frame,
+        report,
+        required_columns=("isBestSeller",) if policy == "required" else (),
+        protected_columns=("isBestSeller",) if policy == "protected" else (),
+    )
+
+    assert result.requests == ()
+    assert any(
+        finding.code == "CONDITIONAL_DROP_COLUMN_PROTECTED" and finding.blocking
+        for finding in result.findings
+    )
+
+
 # ---------------------------------------------------------------------------
 # The whole objective, on both planners
 # ---------------------------------------------------------------------------
@@ -1486,3 +1735,296 @@ def test_the_streamlit_path_with_the_verbatim_objective_and_no_key_selection() -
     assert gold["asin"].is_unique and len(gold) == 4
     assert len(at.download_button) == 7
     assert len(at.exception) == 0, [item.value for item in at.exception]
+
+
+def test_keep_only_compiles_explicit_complement_in_schema_order() -> None:
+    from datachef.application.request_compiler import compile_objective
+
+    frame = pd.DataFrame({"order_id": [1], "region": ["North"], "amount": [10]})
+    report = diagnose_raw_dataframe(frame)
+
+    result = compile_objective("keep only order_id and amount", frame, report)
+
+    assert result.keep_only_columns == ("order_id", "amount")
+    assert [
+        (request.operation_type, request.target_columns)
+        for request in result.requests
+    ] == [(OperationType.DROP_COLUMN, ("region",))]
+    assert result.findings == ()
+
+
+def test_keep_only_all_columns_is_visible_as_already_satisfied() -> None:
+    from datachef.application.request_compiler import compile_objective
+
+    frame = pd.DataFrame({"a": [1], "b": [2]})
+    report = diagnose_raw_dataframe(frame)
+
+    result = compile_objective("keep only a and b", frame, report)
+
+    assert result.keep_only_columns == ("a", "b")
+    assert result.requests == ()
+    assert [(item.code, item.blocking) for item in result.findings] == [
+        ("KEEP_ONLY_ALREADY_SATISFIED", False)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("columns", "objective"),
+    [
+        (("a", "b"), "keep only a and missing"),
+        (("A", "a", "b"), "keep only a"),
+        (("a", "b"), "keep only no columns"),
+    ],
+)
+def test_unresolved_keep_only_is_blocking_and_never_guesses(columns, objective) -> None:
+    from datachef.application.request_compiler import compile_objective
+
+    frame = pd.DataFrame({column: [1] for column in columns})
+    report = diagnose_raw_dataframe(frame)
+
+    result = compile_objective(objective, frame, report)
+
+    assert result.requests == ()
+    assert any(
+        item.code == "KEEP_ONLY_UNSUPPORTED" and item.blocking
+        for item in result.findings
+    )
+
+
+@pytest.mark.parametrize(
+    "objective",
+    (
+        "Create a new column called total by multiplying quantity by unit_price.",
+        "Create total = quantity * unit_price",
+        "Calculate total by multiplying quantity by unit_price",
+        "Compute total as quantity times unit_price",
+        "Create total from quantity multiplied by unit_price",
+    ),
+)
+def test_closed_compute_column_wordings_compile_deterministically(objective) -> None:
+    frame = pd.DataFrame({"quantity": [1, 2], "unit_price": [3.0, 4.0]})
+
+    requests = _compile(objective, frame)
+
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.operation_type is OperationType.COMPUTE_COLUMN
+    assert request.target_columns == ("quantity", "unit_price")
+    assert request.parameters.output_column == "total"
+    assert request.parameters.operator.value == "MULTIPLY"
+
+
+def test_keep_only_compound_exclusion_does_not_consume_shorter_cast_columns() -> None:
+    from datachef.application.request_compiler import build_keep_only_requests
+
+    columns = (
+        "Postal Code",
+        "Profit",
+        "Sales",
+        "Profit From Sales w/o discount",
+        "Segment",
+    )
+    selected = ("Profit", "Sales", "Segment")
+
+    drops = build_keep_only_requests(selected, columns)
+
+    assert [request.target_columns for request in drops] == [
+        ("Postal Code",),
+        ("Profit From Sales w/o discount",),
+    ]
+
+
+def test_compound_column_reference_never_becomes_two_shorter_drops() -> None:
+    frame = pd.DataFrame(
+        {
+            "Profit": [1.0],
+            "Sales": [2.0],
+            "Profit  From Sales w/o discount": [3.0],
+        }
+    )
+
+    requests = _compile(
+        "Drop Profit From Sales w/o discount",
+        frame,
+    )
+
+    assert [request.target_columns for request in requests] == [
+        ("Profit  From Sales w/o discount",)
+    ]
+
+
+def test_false_conditional_drop_cannot_be_reintroduced_by_an_untrusted_planner() -> None:
+    from datachef.contracts import RiskLevel, TransformationOperation
+    from datachef.planning.plan import create_transformation_plan
+
+    class DropAnywayPlanner:
+        def propose(self, context, *, attempt):
+            del attempt
+            return create_transformation_plan(
+                dataset_id=context.dataset_identity.dataset_id,
+                dataset_fingerprint=context.dataset_identity.fingerprint,
+                version=1,
+                operations=(
+                    TransformationOperation(
+                        operation_id="op-drop-against-condition",
+                        operation_type=OperationType.DROP_COLUMN,
+                        target_columns=("isBestSeller",),
+                        parameters=DropColumnParameters(),
+                        user_requirement_ids=("planner-invention",),
+                        rationale="The planner tried to reinterpret the condition.",
+                        expected_effect="Drop a column.",
+                        risk=RiskLevel.MEDIUM,
+                        requires_human_approval=True,
+                    ),
+                ),
+                summary="Adversarial planner output.",
+            )
+
+    controller = DataChefController(planner_factory=DropAnywayPlanner)
+    content = b"isBestSeller,price\nfalse,1\nfalse,2\nfalse,3\n"
+    controller.load_upload(
+        UploadRequest(
+            content=content,
+            declared_suffix=".csv",
+            format=UploadFormat.CSV,
+            parser_options=CsvParserOptions(),
+        )
+    )
+    controller.diagnose()
+    controller.submit_intent(
+        UserIntent(
+            intent_id="false-conditional",
+            user_goal="Drop best seller if it has more than one distinct value.",
+            downstream_use=DownstreamUse.ANALYSIS,
+            acceptable_row_loss_pct=100,
+        ),
+        (),
+    )
+
+    result = controller.prepare_plan(command_id="prepare-false-condition")
+
+    assert result.code == "PLAN_AWAITING_APPROVAL"
+    assert _plan_of(controller).operations == ()
+    assert any(
+        finding.code == "CONDITIONAL_DROP_NOT_MET" and not finding.blocking
+        for finding in controller.session.findings
+    )
+
+
+def test_keep_only_and_numeric_casts_preserve_selected_short_columns() -> None:
+    content = (
+        b"Postal Code,Profit,Sales,Profit  From Sales w/o discount,Segment\n"
+        b"100,$1,$10,9,A\n"
+        b"200,($2),$20,18,B\n"
+    )
+    controller = DataChefController()
+    controller.load_upload(
+        UploadRequest(
+            content=content,
+            declared_suffix=".csv",
+            format=UploadFormat.CSV,
+            parser_options=CsvParserOptions(),
+        )
+    )
+    controller.diagnose()
+    casts = tuple(
+        RequestedTransformation(
+            request_id=f"request-cast-{column.lower()}",
+            operation_type=OperationType.CAST_COLUMN,
+            target_columns=(column,),
+            parameters=CastColumnParameters(target_type=CastTarget.NUMERIC),
+        )
+        for column in ("Profit", "Sales")
+    )
+
+    submitted = controller.submit_intent(
+        UserIntent(
+            intent_id="keep-cast-compound",
+            user_goal="Turn Profit and Sales to numeric",
+            downstream_use=DownstreamUse.ANALYSIS,
+            acceptable_row_loss_pct=100,
+        ),
+        casts,
+        keep_only_columns=("Profit", "Sales", "Segment"),
+    )
+
+    assert submitted.code == "INTENT_RECORDED"
+    requests = {
+        (request.operation_type, request.target_columns)
+        for request in controller.session.requested_transformations
+    }
+    assert (OperationType.CAST_COLUMN, ("Profit",)) in requests
+    assert (OperationType.CAST_COLUMN, ("Sales",)) in requests
+    assert (OperationType.DROP_COLUMN, ("Postal Code",)) in requests
+    assert (
+        OperationType.DROP_COLUMN,
+        ("Profit  From Sales w/o discount",),
+    ) in requests
+    assert (OperationType.DROP_COLUMN, ("Profit",)) not in requests
+    assert (OperationType.DROP_COLUMN, ("Sales",)) not in requests
+
+    prepared = controller.prepare_plan(command_id="prepare-keep-cast")
+    assert prepared.code == "PLAN_AWAITING_APPROVAL"
+    operations = {
+        (operation.operation_type, operation.target_columns)
+        for operation in _plan_of(controller).operations
+    }
+    assert (OperationType.DROP_COLUMN, ("Profit",)) not in operations
+    assert (OperationType.DROP_COLUMN, ("Sales",)) not in operations
+
+
+def test_untrusted_planner_cannot_drop_a_keep_only_selected_column() -> None:
+    from datachef.contracts import RiskLevel, TransformationOperation
+    from datachef.planning.plan import create_transformation_plan
+
+    class DropSelectedPlanner:
+        def propose(self, context, *, attempt):
+            del attempt
+            return create_transformation_plan(
+                dataset_id=context.dataset_identity.dataset_id,
+                dataset_fingerprint=context.dataset_identity.fingerprint,
+                version=1,
+                operations=(
+                    TransformationOperation(
+                        operation_id="op-drop-selected",
+                        operation_type=OperationType.DROP_COLUMN,
+                        target_columns=("Profit",),
+                        parameters=DropColumnParameters(),
+                        user_requirement_ids=("planner-only",),
+                        rationale="Planner-only destructive suggestion.",
+                        expected_effect="Drop a selected column.",
+                        risk=RiskLevel.MEDIUM,
+                        requires_human_approval=True,
+                    ),
+                ),
+                summary="Adversarial selected-column drop.",
+            )
+
+    controller = DataChefController(planner_factory=DropSelectedPlanner)
+    controller.load_upload(
+        UploadRequest(
+            content=b"Profit,Sales,Postal Code\n1,10,100\n2,20,200\n",
+            declared_suffix=".csv",
+            format=UploadFormat.CSV,
+            parser_options=CsvParserOptions(),
+        )
+    )
+    controller.diagnose()
+    controller.submit_intent(
+        UserIntent(
+            intent_id="keep-selected-authoritative",
+            user_goal="Prepare the selected columns.",
+            downstream_use=DownstreamUse.ANALYSIS,
+            acceptable_row_loss_pct=100,
+        ),
+        (),
+        keep_only_columns=("Profit", "Sales"),
+    )
+
+    result = controller.prepare_plan(command_id="prepare-keep-selected")
+
+    assert result.code == "PLAN_AWAITING_APPROVAL"
+    assert [
+        (operation.operation_type, operation.target_columns)
+        for operation in _plan_of(controller).operations
+    ] == [(OperationType.DROP_COLUMN, ("Postal Code",))]

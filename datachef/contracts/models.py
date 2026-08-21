@@ -39,6 +39,7 @@ class OperationType(StrEnum):
     DROP_COLUMN = "DROP_COLUMN"
     IMPUTE_MISSING = "IMPUTE_MISSING"
     NORMALIZE_NUMERIC_TEXT = "NORMALIZE_NUMERIC_TEXT"
+    COMPUTE_COLUMN = "COMPUTE_COLUMN"
 
 
 class Severity(StrEnum):
@@ -81,6 +82,12 @@ class PIIHandling(StrEnum):
     NONE = "NONE"
     MASK = "MASK"
     REMOVE = "REMOVE"
+
+
+class RequestAssessmentStatus(StrEnum):
+    PLANNED = "PLANNED"
+    ALREADY_SATISFIED = "ALREADY_SATISFIED"
+    BLOCKED_UNPLANNED = "BLOCKED_UNPLANNED"
 
 
 class IssueClassification(StrEnum):
@@ -136,6 +143,13 @@ class ImputeStrategy(StrEnum):
     CONSTANT = "CONSTANT"
 
 
+class ComputeOperator(StrEnum):
+    ADD = "ADD"
+    SUBTRACT = "SUBTRACT"
+    MULTIPLY = "MULTIPLY"
+    DIVIDE = "DIVIDE"
+
+
 class OperationExecutionStatus(StrEnum):
     APPLIED = "APPLIED"
     FAILED = "FAILED"
@@ -156,6 +170,7 @@ class InvariantKind(StrEnum):
     NUMERIC_TEXT_NO_NULLS = "NUMERIC_TEXT_NO_NULLS"
     # A dropped column must take nothing else with it.
     DROPPED_COLUMN_STRUCTURE = "DROPPED_COLUMN_STRUCTURE"
+    COMPUTED_COLUMN_ISOLATION = "COMPUTED_COLUMN_ISOLATION"
     PROVENANCE = "PROVENANCE"
 
 
@@ -458,16 +473,35 @@ class ImputeMissingParameters(StrictContract):
 class NormalizeNumericTextParameters(StrictContract):
     """Named noise classes only: no caller-supplied regex, no expression.
 
-    Parenthesised negatives are deliberately absent. Nothing in the repository
-    treats "(1,234.00)" as negative, so inventing that reading here could flip a
-    sign silently. Such a value survives normalization, the following cast turns
-    it null, and CAST_VALUE_PRESERVATION fails the run closed.
+    Parenthesised accounting negatives are one fixed, application-owned grammar;
+    they are not an expression supplied by a user. An invalid token remains
+    invalid text so the following cast and CAST_VALUE_PRESERVATION still fail
+    closed rather than inventing a number.
     """
 
     kind: Literal["NORMALIZE_NUMERIC_TEXT"] = "NORMALIZE_NUMERIC_TEXT"
     strip_whitespace: bool = True
     strip_currency_symbols: bool = True
     strip_thousands_separators: bool = True
+
+
+class ComputeColumnParameters(StrictContract):
+    """One closed binary numeric derivation; arbitrary expressions do not exist."""
+
+    kind: Literal["COMPUTE_COLUMN"] = "COMPUTE_COLUMN"
+    left_column: str = Field(min_length=1)
+    right_column: str = Field(min_length=1)
+    output_column: str = Field(min_length=1)
+    operator: ComputeOperator
+
+    @model_validator(mode="after")
+    def validate_column_names(self) -> "ComputeColumnParameters":
+        if any(
+            not name.strip()
+            for name in (self.left_column, self.right_column, self.output_column)
+        ):
+            raise ValueError("computed-column names must contain non-whitespace text")
+        return self
 
 
 OperationParameters = Annotated[
@@ -479,7 +513,8 @@ OperationParameters = Annotated[
     | DeduplicateByKeysParameters
     | DropColumnParameters
     | ImputeMissingParameters
-    | NormalizeNumericTextParameters,
+    | NormalizeNumericTextParameters
+    | ComputeColumnParameters,
     Field(discriminator="kind"),
 ]
 
@@ -518,6 +553,21 @@ class RequestedOperation(StrictContract):
     operation_type: OperationType
     target_columns: tuple[str, ...] = Field(min_length=1)
     parameters: OperationParameters
+
+
+class RequestAssessment(StrictContract):
+    """Typed planning evidence for one explicit user request."""
+
+    request_id: str = Field(min_length=1)
+    status: RequestAssessmentStatus
+    matched_operation_ids: tuple[str, ...] = Field(default_factory=tuple)
+
+    @model_validator(mode="after")
+    def validate_matching_evidence(self) -> "RequestAssessment":
+        has_matches = bool(self.matched_operation_ids)
+        if (self.status is RequestAssessmentStatus.PLANNED) != has_matches:
+            raise ValueError("only planned requests carry matching operations")
+        return self
 
 
 class TransformationPlan(StrictContract):

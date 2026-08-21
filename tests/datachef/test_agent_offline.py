@@ -136,6 +136,7 @@ def test_the_crew_builds_with_a_fake_llm_and_never_touches_the_network() -> None
             "propose_drop_column",
             "propose_impute_missing",
             "propose_normalize_numeric_text",
+            "propose_compute_column",
             "inspect_profile",
             "estimate_current_plan",
             "discard_last_operation",
@@ -171,6 +172,8 @@ def test_each_tool_exposes_an_args_schema_and_never_an_identity_field() -> None:
         assert "keys" in schemas["propose_deduplicate_by_keys"].model_fields
         assert "target_type" in schemas["propose_cast_column"].model_fields
         assert "new_name" in schemas["propose_rename_column"].model_fields
+        assert "operator" in schemas["propose_compute_column"].model_fields
+        assert "expression" not in schemas["propose_compute_column"].model_fields
         assert "tokens" in schemas["propose_normalize_missing_tokens"].model_fields
         assert "keep" in schemas["propose_drop_duplicate_rows"].model_fields
         assert "summary" in schemas["finalize_plan"].model_fields

@@ -41,7 +41,7 @@ from datachef.contracts import (
     WorkflowStage,
 )
 from datachef.diagnostics import identify_dataset
-from datachef.planning import RuleBasedPlanner, SequenceReviewer
+from datachef.planning import RuleBasedPlanner, SequenceReviewer, create_transformation_plan
 from datachef.workflow import WorkflowRuntime, execute_workflow, prepare_workflow
 
 
@@ -108,6 +108,20 @@ def _dedup_request(keys: tuple[str, ...] = ("order_id",)):
         target_columns=keys,
         parameters=DeduplicateByKeysParameters(keys=keys, keep=KeepPolicy.FIRST),
     )
+
+
+class _EmptyPlanner:
+    """Agent-shaped planner that deliberately omits every requested operation."""
+
+    def propose(self, context, *, attempt: int):
+        del attempt
+        return create_transformation_plan(
+            dataset_id=context.dataset_identity.dataset_id,
+            dataset_fingerprint=context.dataset_identity.fingerprint,
+            version=1,
+            operations=(),
+            summary="No deterministic change is required.",
+        )
 
 
 def _loaded_controller(
@@ -209,7 +223,7 @@ def test_key_dedup_request_reconciles_exact_ordered_keys() -> None:
 
 def test_unplanned_request_is_blocking_and_prevents_approval() -> None:
     controller = _loaded_controller()
-    controller.submit_intent(_intent(), (_cast_request("amount"),))
+    controller.submit_intent(_intent(), (_cast_request("region"),))
     planned = controller.prepare_plan(command_id="plan-unplanned")
 
     refused = controller.record_human_decision(
@@ -228,7 +242,7 @@ def test_unplanned_request_is_blocking_and_prevents_approval() -> None:
 
 def test_blocked_human_decision_command_is_attempt_idempotent() -> None:
     controller = _loaded_controller()
-    controller.submit_intent(_intent(), (_cast_request("amount"),))
+    controller.submit_intent(_intent(), (_cast_request("region"),))
     controller.prepare_plan(command_id="plan-human-block")
 
     first = controller.record_human_decision(
@@ -241,6 +255,205 @@ def test_blocked_human_decision_command_is_attempt_idempotent() -> None:
     assert first.code == "APPROVAL_BLOCKED"
     assert repeated.code == "HUMAN_DECISION_REPLAYED"
     assert controller.session.pending_approval is None
+
+
+def test_already_numeric_cast_is_visible_nonblocking_and_executes_empty_plan() -> None:
+    controller = _loaded_controller(
+        _csv_request(b"order_id,region,amount\n1,North,10\n2,South,20\n")
+    )
+    original = controller.session.source.raw_copy()
+    controller.submit_intent(_intent(), (_cast_request("amount"),))
+
+    planned = controller.prepare_plan(command_id="plan-already-numeric")
+
+    runtime = controller.session.workflow_runtime
+    assert runtime is not None
+    assert runtime.state.transformation_plan is not None
+    assert runtime.state.transformation_plan.operations == ()
+    assert planned.screen is ScreenId.APPROVAL
+    assert any(
+        finding.code == "REQUEST_ALREADY_SATISFIED" and not finding.blocking
+        for finding in planned.findings
+    )
+    assert not any(finding.code == "REQUEST_NOT_PLANNED" for finding in planned.findings)
+
+    approved = controller.record_human_decision(
+        HumanDecision.APPROVE,
+        command_id="approve-already-numeric",
+    )
+    executed = controller.execute_current_plan(command_id="execute-already-numeric")
+
+    assert approved.changed
+    assert executed.changed
+    runtime = controller.session.workflow_runtime
+    assert runtime is not None
+    assert runtime.state.stage is WorkflowStage.QA_PASSED
+    assert runtime.gold_dataframe is not None
+    assert_frame_equal(runtime.gold_dataframe, original)
+    assert runtime.gold_dataframe is not original
+    assert_frame_equal(controller.session.source.raw_copy(), original)
+
+
+def test_omitting_planner_does_not_block_an_already_numeric_cast_request() -> None:
+    controller = _loaded_controller(
+        _csv_request(b"order_id,region,amount\n1,North,10\n2,South,20\n"),
+        planner_factory=_EmptyPlanner,
+    )
+    controller.submit_intent(_intent(), (_cast_request("amount"),))
+
+    result = controller.prepare_plan(command_id="plan-agent-noop")
+
+    assert result.screen is ScreenId.APPROVAL
+    assert any(
+        finding.code == "REQUEST_ALREADY_SATISFIED" and not finding.blocking
+        for finding in result.findings
+    )
+    assert not any(finding.blocking for finding in result.findings)
+
+
+def test_walmart_date_drops_and_already_numeric_cast_reach_approval() -> None:
+    """The legacy phone heuristic must not privacy-alias a real date column."""
+
+    controller = _loaded_controller(
+        _csv_request(
+            b"Store,Date,Weekly_Sales,Fuel_Price,CPI\n"
+            b"1,05-02-2010,1000.0,2.572,211.096\n"
+            b"1,12-02-2010,1100.0,2.548,211.242\n"
+            b"2,19-02-2010,1200.0,2.514,211.289\n"
+        )
+    )
+    report = controller.session.display_diagnostic_report
+    assert report is not None
+    date_profile = next(item for item in report.column_profiles if item.name == "Date")
+    assert not date_profile.possible_pii
+
+    intent = UserIntent(
+        intent_id="intent-walmart-regression",
+        user_goal="Drop Date and CPI.",
+        downstream_use=DownstreamUse.ANALYSIS,
+        acceptable_row_loss_pct=0,
+    )
+    controller.submit_intent(intent, (_cast_request("Fuel_Price"),))
+
+    result = controller.prepare_plan(command_id="plan-walmart-regression")
+    session = controller.session
+    runtime = session.workflow_runtime
+    assert result.code == "PLAN_AWAITING_APPROVAL"
+    assert runtime is not None
+    assert runtime.state.stage is WorkflowStage.AWAITING_APPROVAL
+    assert runtime.state.transformation_plan is not None
+    assert [
+        (operation.operation_type, operation.target_columns)
+        for operation in runtime.state.transformation_plan.operations
+    ] == [
+        (OperationType.DROP_COLUMN, ("Date",)),
+        (OperationType.DROP_COLUMN, ("CPI",)),
+    ]
+    assert runtime.state.plan_validation is not None
+    assert not runtime.state.plan_validation.findings
+    assert any(
+        finding.code == "REQUEST_ALREADY_SATISFIED"
+        and not finding.blocking
+        and finding.request_id == "request-cast-Fuel_Price"
+        for finding in session.findings
+    )
+    assert not any(finding.blocking for finding in session.findings)
+
+
+def test_keep_only_selection_expands_to_explicit_drop_requests_and_gold_schema() -> None:
+    controller = _loaded_controller()
+    controller.submit_intent(
+        _intent(),
+        (),
+        keep_only_columns=("order_id", "amount"),
+    )
+
+    session = controller.session
+    assert session.keep_only_columns == ("order_id", "amount")
+    assert [
+        (request.operation_type, request.target_columns)
+        for request in session.requested_transformations
+    ] == [(OperationType.DROP_COLUMN, ("region",))]
+
+    controller.prepare_plan(command_id="plan-keep-only")
+    plan = controller.session.workflow_runtime.state.transformation_plan
+    assert plan is not None
+    assert [
+        operation.target_columns
+        for operation in plan.operations
+        if operation.operation_type is OperationType.DROP_COLUMN
+    ] == [("region",)]
+    _approve_and_execute(controller)
+
+    gold = controller.session.workflow_runtime.gold_dataframe
+    assert gold is not None
+    assert list(gold.columns) == ["order_id", "amount"]
+
+
+def test_changed_keep_only_selection_invalidates_all_downstream_evidence() -> None:
+    controller = _loaded_controller()
+    controller.submit_intent(
+        _intent(),
+        (),
+        keep_only_columns=("order_id", "amount"),
+    )
+    controller.prepare_plan(command_id="plan-old-keep-only")
+    controller.record_human_decision(HumanDecision.APPROVE, command_id="approve-old")
+
+    changed = controller.revise_intent(
+        _intent(),
+        (),
+        keep_only_columns=("order_id", "region"),
+    )
+
+    assert changed.changed
+    session = controller.session
+    assert session.workflow_runtime is None
+    assert session.pending_approval is None
+    assert session.command_history == ()
+    assert session.keep_only_columns == ("order_id", "region")
+    assert [request.target_columns for request in session.requested_transformations] == [
+        ("amount",)
+    ]
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        ("order_id", "order_id"),
+        ("order_id", "missing"),
+        ("",),
+    ],
+)
+def test_invalid_keep_only_selection_is_rejected_before_planning(selection) -> None:
+    controller = _loaded_controller()
+
+    result = controller.submit_intent(
+        _intent(),
+        (),
+        keep_only_columns=selection,
+    )
+
+    assert result.changed is False
+    assert result.code == "INTENT_REJECTED"
+    assert any(item.code == "INVALID_KEEP_ONLY_SELECTION" for item in result.findings)
+    assert controller.session.intent is None
+
+
+def test_keep_only_cannot_override_required_column_protection() -> None:
+    controller = _loaded_controller()
+    controller.submit_intent(
+        _intent(),
+        (),
+        keep_only_columns=("region", "amount"),
+    )
+
+    result = controller.prepare_plan(command_id="plan-drop-required")
+
+    assert result.screen is ScreenId.PLAN
+    validation = controller.session.workflow_runtime.state.plan_validation
+    assert validation is not None
+    assert any(item.code == "REQUIRED_COLUMN_DROP" for item in validation.findings)
 
 
 def test_same_human_command_id_cannot_authorize_a_different_decision() -> None:

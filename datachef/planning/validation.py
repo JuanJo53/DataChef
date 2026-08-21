@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from datachef.contracts import (
     CastColumnParameters,
+    CastTarget,
     DeduplicateByKeysParameters,
     DiagnosticIssueKind,
     ImputeMissingParameters,
+    ComputeColumnParameters,
+    ComputeOperator,
     ImputeStrategy,
     OperationType,
     PIIHandling,
@@ -98,6 +101,9 @@ def validate_plan(
     protected = set(context.user_intent.protected_columns)
     required = set(context.user_intent.required_columns)
     declared_dtypes = _declared_dtypes(context)
+    current_dtypes = {
+        column.name: column.dtype for column in context.column_schema
+    }
     null_counts = _null_counts(context)
     issue_ids = {issue.issue_id for issue in context.diagnostic_report.issues}
 
@@ -115,7 +121,10 @@ def validate_plan(
         for issue_id in operation.diagnostic_issue_ids:
             if issue_id not in issue_ids:
                 add("UNKNOWN_DIAGNOSTIC_ISSUE", "Operation references an unknown diagnostic issue.", operation.operation_id)
-        if protected.intersection(operation.target_columns):
+        if (
+            operation.operation_type is not OperationType.COMPUTE_COLUMN
+            and protected.intersection(operation.target_columns)
+        ):
             add("PROTECTED_COLUMN", "Protected columns cannot be transformed.", operation.operation_id)
         if set(operation.target_columns).intersection(
             context.privacy_manifest.aliased_columns
@@ -147,12 +156,22 @@ def validate_plan(
             elif operation.target_columns[0] in required:
                 add("REQUIRED_COLUMN_RENAME", "Required columns cannot be renamed.", operation.operation_id)
             elif not missing:
+                source = operation.target_columns[0]
+                source_dtype = current_dtypes.pop(source, "")
                 lineage.rename(operation.target_columns[0], parameters.new_name)
+                current_dtypes[parameters.new_name] = source_dtype
         elif operation.operation_type is OperationType.CAST_COLUMN:
             if len(operation.target_columns) != 1:
                 add("CAST_TARGET_COUNT", "Cast requires exactly one target column.", operation.operation_id)
             if not isinstance(operation.parameters, CastColumnParameters):
                 add("UNSUPPORTED_CAST", "Cast target is unsupported.", operation.operation_id)
+            elif not missing:
+                current_dtypes[operation.target_columns[0]] = {
+                    CastTarget.STRING: "string",
+                    CastTarget.NUMERIC: "float64",
+                    CastTarget.BOOLEAN: "boolean",
+                    CastTarget.DATETIME: "datetime64[ns]",
+                }[operation.parameters.target_type]
         elif operation.operation_type is OperationType.DEDUPLICATE_BY_KEYS:
             parameters = operation.parameters
             assert isinstance(parameters, DeduplicateByKeysParameters)
@@ -203,6 +222,64 @@ def validate_plan(
                 if not missing and not dropped_required and surviving:
                     for column in operation.target_columns:
                         lineage.drop(column)
+                        current_dtypes.pop(column, None)
+        elif operation.operation_type is OperationType.COMPUTE_COLUMN:
+            parameters = operation.parameters
+            assert isinstance(parameters, ComputeColumnParameters)
+            inputs = (parameters.left_column, parameters.right_column)
+            valid = True
+            if tuple(operation.target_columns) != inputs:
+                add(
+                    "COMPUTE_TARGET_MISMATCH",
+                    "Computed-column targets must equal the ordered input columns.",
+                    operation.operation_id,
+                )
+                valid = False
+            for column in inputs:
+                if column not in current_columns:
+                    valid = False
+                    continue
+                if not _is_numeric_dtype(current_dtypes.get(column, "")):
+                    add(
+                        "COMPUTE_NON_NUMERIC_INPUT",
+                        f"Computed-column input must be numeric: {column}.",
+                        operation.operation_id,
+                    )
+                    valid = False
+            if parameters.output_column in current_columns:
+                add(
+                    "COMPUTE_OUTPUT_COLLISION",
+                    "Computed-column output already exists at this step.",
+                    operation.operation_id,
+                )
+                valid = False
+            if parameters.operator is ComputeOperator.DIVIDE:
+                original_right = lineage.original_for_current(parameters.right_column)
+                statistic = next(
+                    (
+                        item
+                        for item in context.column_statistics
+                        if item.column == (original_right or parameters.right_column)
+                    ),
+                    None,
+                )
+                if statistic is None:
+                    add(
+                        "COMPUTE_DENOMINATOR_UNVERIFIED",
+                        "Division requires deterministic denominator statistics.",
+                        operation.operation_id,
+                    )
+                    valid = False
+                elif statistic.zero_count:
+                    add(
+                        "COMPUTE_ZERO_DENOMINATOR",
+                        "Division is not allowed when the denominator contains zero.",
+                        operation.operation_id,
+                    )
+                    valid = False
+            if valid and not missing:
+                lineage.add(parameters.output_column)
+                current_dtypes[parameters.output_column] = "float64"
         elif operation.operation_type is OperationType.IMPUTE_MISSING:
             parameters = operation.parameters
             assert isinstance(parameters, ImputeMissingParameters)

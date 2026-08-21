@@ -9,6 +9,8 @@ import pandas as pd
 from datachef.contracts import (
     AcceptedReviewEvidence,
     CastColumnParameters,
+    ComputeColumnParameters,
+    ComputeOperator,
     DropColumnParameters,
     CastTarget,
     DiagnosticIssueComparison,
@@ -533,6 +535,66 @@ def _operation_preservation_results(
     return tuple(results)
 
 
+def _computed_column_results(
+    plan: TransformationPlan,
+    execution: ExecutionResult,
+    replay: OperationRun,
+) -> tuple[InvariantResult, ...]:
+    """Verify each computation from replayed pre-operation inputs."""
+
+    records = {record.operation_id: record for record in execution.operation_records}
+    replay_records = {record.operation_id: record for record in replay.operation_records}
+    evidence = {item.operation_id: item for item in replay.computation_evidence}
+    results: list[InvariantResult] = []
+    for operation in plan.operations:
+        if operation.operation_type is not OperationType.COMPUTE_COLUMN:
+            continue
+        parameters = operation.parameters
+        assert isinstance(parameters, ComputeColumnParameters)
+        step = evidence.get(operation.operation_id)
+        supplied_record = records.get(operation.operation_id)
+        replay_record = replay_records.get(operation.operation_id)
+        expected = None
+        if step is not None:
+            if parameters.operator is ComputeOperator.ADD:
+                expected = step.left_values + step.right_values
+            elif parameters.operator is ComputeOperator.SUBTRACT:
+                expected = step.left_values - step.right_values
+            elif parameters.operator is ComputeOperator.MULTIPLY:
+                expected = step.left_values * step.right_values
+            elif parameters.operator is ComputeOperator.DIVIDE:
+                if not bool(step.right_values.eq(0).fillna(False).any()):
+                    expected = step.left_values / step.right_values
+        structure_held = bool(
+            step is not None
+            and step.rows_before == step.rows_after
+            and step.existing_columns_preserved
+            and step.after_columns == step.before_columns + (parameters.output_column,)
+        )
+        passed = bool(
+            structure_held
+            and expected is not None
+            and step is not None
+            and expected.equals(step.output_values)
+            and supplied_record is not None
+            and replay_record is not None
+            and supplied_record == replay_record
+        )
+        results.append(
+            InvariantResult(
+                invariant_id=f"compute-isolation-{operation.operation_id}",
+                kind=InvariantKind.COMPUTED_COLUMN_ISOLATION,
+                status=InvariantStatus.PASS if passed else InvariantStatus.FAIL,
+                mandatory=True,
+                explanation=(
+                    "Computed columns must add exactly the approved output, preserve "
+                    "all existing columns and rows, and equal closed arithmetic replay."
+                ),
+            )
+        )
+    return tuple(results)
+
+
 def _column_lineage(
     report: DiagnosticReport,
     plan: TransformationPlan,
@@ -721,6 +783,7 @@ def run_quality_assurance(
         + _operation_preservation_results(
             plan, execution, replay, source, transformed
         )
+        + _computed_column_results(plan, execution, replay)
         + ordinary_results
     )
     execution_failures = tuple(

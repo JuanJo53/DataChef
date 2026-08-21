@@ -68,9 +68,7 @@ from datachef.transform.runner import OperationRun, run_allowlisted_plan
 REPO_ROOT = Path(__file__).resolve().parents[2]
 NOW = datetime(2026, 8, 18, 12, 0, tzinfo=timezone.utc)
 
-# The demo dataset. Deliberately free of parenthesised negatives: nothing in the
-# repository reads "(1,234.00)" as negative, so normalization leaves them alone
-# and a following cast would fail the run closed rather than flip a sign.
+# The demo dataset used by the existing operation-slice scenarios.
 DEMO_CSV = (
     b"order_id,amount_text,qty,junk\n"
     b"1,\xc2\xa0$1,304.20 ,1,x\n"
@@ -128,7 +126,7 @@ def _plan(*operations):
 
 def test_the_three_operations_are_registered_with_the_expected_flags() -> None:
     assert set(OPERATION_CATALOGUE) == set(OperationType)
-    assert len(OPERATION_CATALOGUE) == 9
+    assert len(OPERATION_CATALOGUE) == 10
     for operation_type in (
         OperationType.DROP_COLUMN,
         OperationType.IMPUTE_MISSING,
@@ -162,6 +160,54 @@ def test_normalize_numeric_text_strips_only_the_named_noise_classes() -> None:
     # It prepares; it does not cast.
     assert not pd.api.types.is_numeric_dtype(run.dataframe["amount_text"].dtype)
     assert run.operation_records[0].introduced_null_count == 0
+
+
+def test_normalize_numeric_text_supports_closed_accounting_negative_notation() -> None:
+    frame = pd.DataFrame(
+        {
+            "amount": [
+                "($5)",
+                "($2,574)",
+                "-$65",
+                "$0",
+                "$1,234",
+                " $2,574 ",
+                "abc",
+            ]
+        }
+    )
+    normalize = _operation(
+        "op-001-normalize_numeric_text",
+        OperationType.NORMALIZE_NUMERIC_TEXT,
+        ("amount",),
+        NormalizeNumericTextParameters(),
+    )
+    cast = _operation(
+        "op-002-cast_column",
+        OperationType.CAST_COLUMN,
+        ("amount",),
+        CastColumnParameters(
+            target_type=CastTarget.NUMERIC,
+            errors=CastErrorPolicy.COERCE,
+        ),
+    )
+
+    normalized = run_allowlisted_plan(frame, _plan(normalize))
+    destructive = run_allowlisted_plan(frame, _plan(normalize, cast))
+
+    assert normalized.success
+    assert normalized.dataframe is not None
+    assert list(normalized.dataframe["amount"]) == [
+        "-5",
+        "-2574",
+        "-65",
+        "0",
+        "1234",
+        "2574",
+        "abc",
+    ]
+    assert destructive.success
+    assert destructive.operation_records[-1].introduced_null_count == 1
 
 
 def test_normalize_numeric_text_switches_are_independent() -> None:
@@ -1122,11 +1168,11 @@ def test_the_chained_plan_produces_numeric_gold_and_a_full_bundle() -> None:
     )
 
 
-def test_a_parenthesised_negative_fails_closed_rather_than_flipping_sign() -> None:
-    """The documented limit: normalization leaves it, the cast refuses."""
+def test_an_invalid_parenthesised_token_still_fails_closed() -> None:
+    """Accounting syntax never turns arbitrary text into a numeric value."""
 
     frame = pd.DataFrame(
-        {"order_id": [1, 2], "amount_text": ["$1,000.00", "($5.00)"]}
+        {"order_id": [1, 2], "amount_text": ["$1,000.00", "($unknown)"]}
     )
     plan = _plan(
         _operation(
@@ -1336,7 +1382,7 @@ def test_the_new_operations_keep_the_script_standalone_and_sanitized() -> None:
         for line in text.splitlines()
         if line.startswith(("import ", "from "))
     ]
-    assert imports == ["import sys", "import pandas as pd"]
+    assert imports == ["import sys", "import re", "import pandas as pd"]
     for line in text.splitlines():
         if line.lstrip().startswith("#"):
             for terminator in ("\n", "\r", " ", " "):

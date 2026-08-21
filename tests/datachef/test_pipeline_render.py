@@ -42,6 +42,8 @@ from datachef.contracts import (
     ImputeMissingParameters,
     ImputeStrategy,
     NormalizeNumericTextParameters,
+    ComputeColumnParameters,
+    ComputeOperator,
 )
 from datachef.diagnostics import dataframe_fingerprint
 from datachef.planning.plan import create_transformation_plan
@@ -245,6 +247,18 @@ _NORMALIZE_NUMERIC_TEXT = _operation(
     NormalizeNumericTextParameters(),
 )
 
+_COMPUTE_COLUMN = _operation(
+    "op-001-compute_column",
+    OperationType.COMPUTE_COLUMN,
+    ("order_id", "order_id"),
+    ComputeColumnParameters(
+        left_column="order_id",
+        right_column="order_id",
+        output_column="computed_total",
+        operator=ComputeOperator.MULTIPLY,
+    ),
+)
+
 # One case per operation type, plus the cast variants, plus a multi-operation
 # plan that runs them in sequence the way an agent-proposed plan would.
 EQUIVALENCE_CASES: tuple[tuple[str, tuple[TransformationOperation, ...]], ...] = (
@@ -260,6 +274,7 @@ EQUIVALENCE_CASES: tuple[tuple[str, tuple[TransformationOperation, ...]], ...] =
     ("DROP_COLUMN", (_DROP_COLUMN,)),
     ("IMPUTE_MISSING", (_IMPUTE_MISSING,)),
     ("NORMALIZE_NUMERIC_TEXT", (_NORMALIZE_NUMERIC_TEXT,)),
+    ("COMPUTE_COLUMN", (_COMPUTE_COLUMN,)),
 )
 
 
@@ -444,6 +459,44 @@ def test_emitted_script_matches_the_executor_per_operation_type(
     script_path.write_bytes(render_pipeline_bytes(plan))
     frame_path = tmp_path / "frame.pkl"
     _demo_frame().to_pickle(frame_path)
+
+    completed = _fingerprint_in_subprocess(script_path, frame_path)
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == dataframe_fingerprint(expected.dataframe)
+
+
+def test_accounting_currency_pipeline_matches_normalize_then_cast_executor(
+    tmp_path: Path,
+) -> None:
+    frame = pd.DataFrame(
+        {"amount": ["($5)", "($2,574)", "-$65", "$0", "$1,234"]}
+    )
+    plan = _plan(
+        _operation(
+            "op-001-normalize_numeric_text",
+            OperationType.NORMALIZE_NUMERIC_TEXT,
+            ("amount",),
+            NormalizeNumericTextParameters(),
+        ),
+        _operation(
+            "op-002-cast_column",
+            OperationType.CAST_COLUMN,
+            ("amount",),
+            CastColumnParameters(
+                target_type=CastTarget.NUMERIC,
+                errors=CastErrorPolicy.COERCE,
+            ),
+        ),
+    )
+    expected = run_allowlisted_plan(frame, plan)
+    assert expected.success and expected.dataframe is not None
+    assert list(expected.dataframe["amount"]) == [-5, -2574, -65, 0, 1234]
+
+    script_path = tmp_path / "accounting_pipeline.py"
+    script_path.write_bytes(render_pipeline_bytes(plan))
+    frame_path = tmp_path / "accounting_frame.pkl"
+    frame.to_pickle(frame_path)
 
     completed = _fingerprint_in_subprocess(script_path, frame_path)
 

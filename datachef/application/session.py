@@ -33,6 +33,7 @@ class ApplicationSession:
     display_diagnostic_report: DiagnosticReport | None = None
     intent: UserIntent | None = None
     requested_transformations: tuple[RequestedTransformation, ...] = ()
+    keep_only_columns: tuple[str, ...] = ()
     suggested_questions: tuple[SuggestedQuestion, ...] = ()
     selected_question_ids: tuple[str, ...] = ()
     workflow_runtime: WorkflowRuntime | None = None
@@ -57,6 +58,10 @@ class ApplicationSession:
         )
         if len(set(semantic_requests)) != len(semantic_requests):
             raise ValueError("requested transformations must be semantically unique")
+        if len(set(self.keep_only_columns)) != len(self.keep_only_columns):
+            raise ValueError("keep-only columns must be unique")
+        if any(not column.strip() for column in self.keep_only_columns):
+            raise ValueError("keep-only columns must contain non-whitespace text")
         if len(set(self.selected_question_ids)) != len(self.selected_question_ids):
             raise ValueError("selected question IDs must be unique")
         if any(not isinstance(item, CommandAttempt) for item in self.command_history):
@@ -138,6 +143,7 @@ def accept_source(
             display_diagnostic_report=None,
             intent=None,
             requested_transformations=(),
+            keep_only_columns=(),
             suggested_questions=(),
             selected_question_ids=(),
             workflow_runtime=None,
@@ -183,6 +189,7 @@ def record_intent(
     *,
     selected_question_ids: tuple[str, ...] = (),
     findings: tuple[ApplicationFinding, ...] = (),
+    keep_only_columns: tuple[str, ...] = (),
 ) -> ApplicationSession:
     request_ids = tuple(request.request_id for request in requests)
     if len(set(request_ids)) != len(request_ids):
@@ -192,6 +199,7 @@ def record_intent(
     if (
         session.intent == intent
         and session.requested_transformations == requests
+        and session.keep_only_columns == keep_only_columns
         and session.selected_question_ids == selected_question_ids
         and session.findings == findings
     ):
@@ -201,6 +209,7 @@ def record_intent(
         screen=ScreenId.PLAN,
         intent=intent,
         requested_transformations=requests,
+        keep_only_columns=keep_only_columns,
         selected_question_ids=selected_question_ids,
         workflow_runtime=None,
         findings=findings,

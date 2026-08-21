@@ -37,6 +37,8 @@ import ast
 
 from datachef.contracts import (
     CastColumnParameters,
+    ComputeColumnParameters,
+    ComputeOperator,
     DropColumnParameters,
     ImputeMissingParameters,
     ImputeStrategy,
@@ -338,6 +340,17 @@ def _normalize_numeric_text_lines(
         "        return value",
         "    text = value",
     ]
+    if parameters.strip_whitespace:
+        lines.append("    text = text.strip()")
+    lines.extend(
+        [
+            "    accounting_negative = text.startswith('(') and text.endswith(')')",
+            "    if accounting_negative:",
+            "        text = text[1:-1]",
+        ]
+    )
+    if parameters.strip_whitespace:
+        lines.append("        text = text.strip()")
     if parameters.strip_currency_symbols:
         lines.extend(
             [
@@ -358,6 +371,15 @@ def _normalize_numeric_text_lines(
         )
     if parameters.strip_whitespace:
         lines.append("    text = text.strip()")
+    lines.extend(
+        [
+            "    if accounting_negative:",
+            "        if re.fullmatch(r'\\+?(?:\\d+(?:\\.\\d*)?|\\.\\d+)', text):",
+            "            text = '-' + text.removeprefix('+')",
+            "        else:",
+            "            text = '(' + text + ')'",
+        ]
+    )
     lines.append("    return text")
     lines.append("")
     lines.append("for _column in " + _text_list(operation.target_columns) + ":")
@@ -404,6 +426,34 @@ def _impute_missing_lines(
     return lines
 
 
+def _compute_column_lines(
+    operation: TransformationOperation,
+    slug: str,
+) -> list[str]:
+    del slug
+    parameters = operation.parameters
+    assert isinstance(parameters, ComputeColumnParameters)
+    left = "frame[" + _text(parameters.left_column) + "]"
+    right = "frame[" + _text(parameters.right_column) + "]"
+    output = "frame[" + _text(parameters.output_column) + "]"
+    symbols = {
+        ComputeOperator.ADD: "+",
+        ComputeOperator.SUBTRACT: "-",
+        ComputeOperator.MULTIPLY: "*",
+        ComputeOperator.DIVIDE: "/",
+    }
+    lines: list[str] = []
+    if parameters.operator is ComputeOperator.DIVIDE:
+        lines.extend(
+            [
+                "if bool(" + right + ".eq(0).fillna(False).any()):",
+                "    raise ValueError(" + _text("division by zero is not allowed") + ")",
+            ]
+        )
+    lines.append(output + " = " + left + " " + symbols[parameters.operator] + " " + right)
+    return lines
+
+
 _OPERATION_RENDERERS = {
     OperationType.TRIM_WHITESPACE: _trim_whitespace_lines,
     OperationType.NORMALIZE_MISSING_TOKENS: _normalize_missing_tokens_lines,
@@ -414,6 +464,7 @@ _OPERATION_RENDERERS = {
     OperationType.DROP_COLUMN: _drop_column_lines,
     OperationType.IMPUTE_MISSING: _impute_missing_lines,
     OperationType.NORMALIZE_NUMERIC_TEXT: _normalize_numeric_text_lines,
+    OperationType.COMPUTE_COLUMN: _compute_column_lines,
 }
 
 
@@ -519,6 +570,7 @@ def render_pipeline_script(plan: TransformationPlan) -> str:
         "# operation_count: " + str(len(plan.operations)),
         "",
         "import sys",
+        "import re",
         "",
         "import pandas as pd",
         "",

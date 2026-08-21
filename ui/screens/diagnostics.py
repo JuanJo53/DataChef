@@ -43,7 +43,7 @@ def _metric_card(
         f'</div>'
     )
 
-    st.markdown(html, unsafe_allow_html=True)
+    st.html(html)
 
 
 def _render_data_health(report: Any) -> None:
@@ -225,7 +225,7 @@ def _render_issue_card(issue: Any) -> None:
         '</div>'
     )
 
-    st.markdown(html, unsafe_allow_html=True)
+    st.html(html)
 
 
 def _render_issues(report: Any) -> None:
@@ -236,14 +236,13 @@ def _render_issues(report: Any) -> None:
     st.markdown(f"## Detected issues ({len(issues)})")
 
     if not issues:
-        st.markdown(
+        st.html(
             """
             <div class="diagnostic-success-card">
                 <span>●</span>
                 No diagnostic issues were detected.
             </div>
-            """,
-            unsafe_allow_html=True,
+            """
         )
         return
 
@@ -333,25 +332,16 @@ def render(controller: Any, state: Any) -> None:
 
     _render_data_health(report)
 
-    st.markdown(
-        '<div class="diagnostic-section-space"></div>',
-        unsafe_allow_html=True,
-    )
+    st.html('<div class="diagnostic-section-space"></div>')
 
     _render_issues(report)
 
-    st.markdown(
-        '<div class="diagnostic-section-space"></div>',
-        unsafe_allow_html=True,
-    )
+    st.html('<div class="diagnostic-section-space"></div>')
 
     _render_columns(report)
     _render_key_duplicates(report)
 
-    st.markdown(
-        '<div class="diagnostic-bottom-space"></div>',
-        unsafe_allow_html=True,
-    )
+    st.html('<div class="diagnostic-bottom-space"></div>')
 
     # --------------------------------------------------
     # Navigation

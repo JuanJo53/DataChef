@@ -127,6 +127,8 @@ def render_findings(findings: Any) -> None:
             line = f"{line} _(request {finding.request_id})_"
         if finding.blocking:
             st.error(line)
+        elif finding.code == "REQUEST_ALREADY_SATISFIED":
+            st.info(line)
         else:
             st.warning(line)
 

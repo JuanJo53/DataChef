@@ -50,18 +50,15 @@ from datachef.application.session import (
 )
 from datachef.application.uploads import parse_upload, source_metadata_for_upload
 from datachef.contracts import (
-    DropColumnParameters,
-    ImputeMissingParameters,
     RequestedOperation,
-    CastColumnParameters,
-    CastTarget,
-    DeduplicateByKeysParameters,
     DiagnosticIssueKind,
     HumanApproval,
     HumanDecision,
     OperationType,
     PIIHandling,
     QAStatus,
+    RequestAssessment,
+    RequestAssessmentStatus,
     SuggestedQuestion,
     WorkflowState,
     WorkflowStage,
@@ -69,7 +66,13 @@ from datachef.contracts import (
 )
 from datachef.diagnostics import diagnose_raw_dataframe, identify_dataset
 from datachef.intent import discover_questions
-from datachef.planning import Planner, Reviewer, RuleBasedPlanner, RuleBasedReviewer
+from datachef.planning import (
+    Planner,
+    Reviewer,
+    RuleBasedPlanner,
+    RuleBasedReviewer,
+    assess_requested_operation,
+)
 from datachef.workflow import (
     WorkflowRuntime,
     execute_workflow,
@@ -180,6 +183,7 @@ class DataChefController:
             source.identity.fingerprint,
             intent.model_dump_json(),
             requests,
+            "\n".join(self._session.keep_only_columns),
             selected,
         )
 
@@ -511,6 +515,7 @@ class DataChefController:
         requests: tuple[RequestedTransformation, ...],
         *,
         selected_question_ids: tuple[str, ...] = (),
+        keep_only_columns: tuple[str, ...] = (),
     ) -> TransitionResult:
         if self._session.source is None or self._session.display_diagnostic_report is None:
             return self._transition(changed=False, code="DIAGNOSIS_REQUIRED")
@@ -545,12 +550,26 @@ class DataChefController:
                     blocking=True,
                 )
             )
-        findings = tuple(finding_items)
         # The objective is prose; the planner may only act on typed requests. It
         # is compiled here, locally, from the free-form goal and the raw frame,
         # and only when the caller supplied no typed requests of its own, so an
         # explicit caller always wins. Nothing compiled here reaches a provider.
-        intent, requests = self._with_compiled_requests(intent, requests)
+        try:
+            intent, requests, keep_only_columns, compiled_findings = (
+                self._with_compiled_requests(intent, requests, keep_only_columns)
+            )
+        except ValueError:
+            finding = _finding(
+                "INVALID_KEEP_ONLY_SELECTION",
+                "Keep-only columns must be unique, nonempty names from the current schema.",
+                blocking=True,
+            )
+            return self._transition(
+                changed=False,
+                code="INTENT_REJECTED",
+                findings=(finding,),
+            )
+        findings = tuple(finding_items) + compiled_findings
         previous = self._session
         try:
             self._session = record_intent(
@@ -559,6 +578,7 @@ class DataChefController:
                 requests,
                 selected_question_ids=selected_question_ids,
                 findings=findings,
+                keep_only_columns=keep_only_columns,
             )
         except ValueError:
             finding = _finding(
@@ -580,7 +600,13 @@ class DataChefController:
         self,
         intent: UserIntent,
         requests: tuple[RequestedTransformation, ...],
-    ) -> tuple[UserIntent, tuple[RequestedTransformation, ...]]:
+        keep_only_columns: tuple[str, ...],
+    ) -> tuple[
+        UserIntent,
+        tuple[RequestedTransformation, ...],
+        tuple[str, ...],
+        tuple[ApplicationFinding, ...],
+    ]:
         """Merge typed requests from the objective with any the caller supplied.
 
         Both are real user intent: the checkboxes on the Objective screen and the
@@ -593,16 +619,72 @@ class DataChefController:
 
         source = self._session.source
         report = self._session.display_diagnostic_report
-        if source is None or report is None or not intent.user_goal.strip():
-            return intent, requests
-        try:
-            from datachef.application.request_compiler import compile_requests
+        if source is None or report is None:
+            return intent, requests, keep_only_columns, ()
+        from datachef.application.request_compiler import (
+            build_keep_only_requests,
+            compile_objective,
+        )
 
-            compiled = compile_requests(intent.user_goal, source.raw_copy(), report)
+        available = tuple(column.name for column in source.identity.column_schema)
+        if keep_only_columns:
+            if len(set(keep_only_columns)) != len(keep_only_columns):
+                raise ValueError("duplicate keep-only column")
+            if any(not column.strip() for column in keep_only_columns):
+                raise ValueError("blank keep-only column")
+            if not set(keep_only_columns).issubset(available):
+                raise ValueError("unknown keep-only column")
+            explicit_keep = tuple(
+                column for column in available if column in set(keep_only_columns)
+            )
+        else:
+            explicit_keep = ()
+
+        compiled = None
+        try:
+            compiled = compile_objective(
+                intent.user_goal,
+                source.raw_copy(),
+                report,
+                required_columns=intent.required_columns,
+                protected_columns=intent.protected_columns,
+            )
         except Exception:
-            # Compilation is a convenience, never a gate. A failure leaves the
-            # session with whatever the caller supplied rather than blocking.
-            return intent, requests
+            return (
+                intent,
+                requests,
+                explicit_keep,
+                (
+                    _finding(
+                        "OBJECTIVE_COMPILATION_FAILURE",
+                        "The local objective compiler could not classify the request safely.",
+                        blocking=True,
+                    ),
+                ),
+            )
+
+        compiled_keep = compiled.keep_only_columns
+        findings = list(compiled.findings)
+        if explicit_keep and compiled_keep and explicit_keep != compiled_keep:
+            findings.append(
+                _finding(
+                    "KEEP_ONLY_CONFLICT",
+                    "The typed keep-only selection conflicts with the written objective.",
+                    blocking=True,
+                )
+            )
+        effective_keep = explicit_keep or compiled_keep
+        keep_requests = build_keep_only_requests(effective_keep, available)
+        if effective_keep and not keep_requests and not any(
+            finding.code == "KEEP_ONLY_ALREADY_SATISFIED" for finding in findings
+        ):
+            findings.append(
+                _finding(
+                    "KEEP_ONLY_ALREADY_SATISFIED",
+                    "The keep-only selection already contains every column.",
+                    blocking=False,
+                )
+            )
 
         claimed = {
             (request.operation_type, tuple(request.target_columns))
@@ -611,8 +693,25 @@ class DataChefController:
         explicit_columns = {
             column for request in requests for column in request.target_columns
         }
+        keep_drop_columns = {
+            column for request in keep_requests for column in request.target_columns
+        }
+        conflicting = keep_drop_columns.intersection(explicit_columns)
+        if conflicting:
+            findings.append(
+                _finding(
+                    "KEEP_ONLY_REQUEST_CONFLICT",
+                    "A typed transformation targets a column the keep-only request would drop.",
+                    blocking=True,
+                )
+            )
         merged = list(requests)
-        for candidate in compiled:
+        candidates = tuple(keep_requests) + tuple(
+            request
+            for request in compiled.requests
+            if not request.request_id.startswith("request-keep-only-drop-")
+        )
+        for candidate in candidates:
             key = (candidate.operation_type, tuple(candidate.target_columns))
             if key in claimed:
                 continue
@@ -622,7 +721,13 @@ class DataChefController:
                 continue
             claimed.add(key)
             merged.append(candidate)
-        return self._with_nominated_keys(intent, tuple(merged)), tuple(merged)
+        merged_tuple = tuple(merged)
+        return (
+            self._with_nominated_keys(intent, merged_tuple),
+            merged_tuple,
+            effective_keep,
+            tuple(findings),
+        )
 
     def _with_nominated_keys(
         self,
@@ -673,17 +778,43 @@ class DataChefController:
 
         planner = self._planner_factory()
         requested = self._requested_operations()
+        conditional_drop_exclusions: tuple[str, ...] = ()
+        source = self._session.source
+        report = self._session.display_diagnostic_report
+        intent = self._session.intent
+        if source is not None and report is not None and intent is not None:
+            from datachef.application.request_compiler import compile_objective
+
+            # This is the same local compiler that admitted the intent. A
+            # failure here must stop preparation rather than silently removing
+            # the condition that constrains an untrusted planner.
+            conditional_drop_exclusions = compile_objective(
+                intent.user_goal,
+                source.raw_copy(),
+                report,
+                required_columns=intent.required_columns,
+                protected_columns=intent.protected_columns,
+            ).conditional_drop_exclusions
+        conditional_drop_exclusions = tuple(
+            dict.fromkeys(
+                (*conditional_drop_exclusions, *self._session.keep_only_columns)
+            )
+        )
         accept = getattr(planner, "accept_requests", None)
         if callable(accept):
             accept(requested)
-        if not requested:
+        if not requested and not conditional_drop_exclusions:
             return planner
         # The live planner builds its own plan and would otherwise return it
         # verbatim, discarding what the user asked for. Wrapping makes the
         # compiled requests authoritative over any planner's proposal.
         from datachef.planning.requests import RequestAwarePlanner
 
-        return RequestAwarePlanner(planner, requested)
+        return RequestAwarePlanner(
+            planner,
+            requested,
+            conditional_drop_exclusions,
+        )
 
     def revise_intent(
         self,
@@ -691,11 +822,13 @@ class DataChefController:
         requests: tuple[RequestedTransformation, ...],
         *,
         selected_question_ids: tuple[str, ...] = (),
+        keep_only_columns: tuple[str, ...] = (),
     ) -> TransitionResult:
         return self.submit_intent(
             intent,
             requests,
             selected_question_ids=selected_question_ids,
+            keep_only_columns=keep_only_columns,
         )
 
     def _diagnostic_link_matches(
@@ -729,56 +862,45 @@ class DataChefController:
             for issue in context.diagnostic_report.issues
         )
 
-    def _request_is_planned(
+    def _assess_request(
         self,
         request: RequestedTransformation,
         runtime: WorkflowRuntime,
-    ) -> bool:
+    ) -> RequestAssessment:
         plan = runtime.state.transformation_plan
-        if plan is None:
-            return False
-        for operation in plan.operations:
-            if operation.operation_type is not request.operation_type:
-                continue
-            if operation.target_columns != request.target_columns:
-                continue
-            if request.operation_type is OperationType.CAST_COLUMN:
-                if not (
-                    isinstance(operation.parameters, CastColumnParameters)
-                    and operation.parameters.target_type is CastTarget.NUMERIC
-                    and self._diagnostic_link_matches(
-                        request,
-                        operation.diagnostic_issue_ids,
-                        runtime,
-                    )
-                ):
-                    continue
-            elif request.operation_type is OperationType.DROP_COLUMN:
-                if not isinstance(operation.parameters, DropColumnParameters):
-                    continue
-            elif request.operation_type is OperationType.IMPUTE_MISSING:
-                requested_impute = request.parameters
-                if not (
-                    isinstance(requested_impute, ImputeMissingParameters)
-                    and isinstance(operation.parameters, ImputeMissingParameters)
-                    and operation.parameters.strategy is requested_impute.strategy
-                    and operation.parameters.constant_value
-                    == requested_impute.constant_value
-                ):
-                    continue
-            elif request.operation_type is OperationType.DEDUPLICATE_BY_KEYS:
-                requested = request.parameters
-                if not (
-                    isinstance(requested, DeduplicateByKeysParameters)
-                    and isinstance(operation.parameters, DeduplicateByKeysParameters)
-                    and operation.parameters.keys == requested.keys
-                    and operation.parameters.keep is requested.keep
-                ):
-                    continue
-            else:
-                continue
-            return True
-        return False
+        context = runtime.state.planning_context
+        if plan is None or context is None:
+            return RequestAssessment(
+                request_id=request.request_id,
+                status=RequestAssessmentStatus.BLOCKED_UNPLANNED,
+            )
+        assessment = assess_requested_operation(
+            request.as_requested_operation(),
+            context,
+            plan,
+        )
+        if (
+            assessment.status is RequestAssessmentStatus.PLANNED
+            and request.operation_type is OperationType.CAST_COLUMN
+        ):
+            matched = {
+                operation.operation_id: operation
+                for operation in plan.operations
+                if operation.operation_id in assessment.matched_operation_ids
+            }
+            if not any(
+                self._diagnostic_link_matches(
+                    request,
+                    operation.diagnostic_issue_ids,
+                    runtime,
+                )
+                for operation in matched.values()
+            ):
+                return RequestAssessment(
+                    request_id=request.request_id,
+                    status=RequestAssessmentStatus.BLOCKED_UNPLANNED,
+                )
+        return assessment
 
     def _reconcile_requests(
         self,
@@ -786,7 +908,17 @@ class DataChefController:
     ) -> tuple[ApplicationFinding, ...]:
         findings = list(self._session.findings)
         for request in self._session.requested_transformations:
-            if not self._request_is_planned(request, runtime):
+            assessment = self._assess_request(request, runtime)
+            if assessment.status is RequestAssessmentStatus.ALREADY_SATISFIED:
+                findings.append(
+                    _finding(
+                        "REQUEST_ALREADY_SATISFIED",
+                        "The requested column already has a numeric dtype; no operation is required.",
+                        blocking=False,
+                        request_id=request.request_id,
+                    )
+                )
+            elif assessment.status is RequestAssessmentStatus.BLOCKED_UNPLANNED:
                 findings.append(
                     _finding(
                         "REQUEST_NOT_PLANNED",

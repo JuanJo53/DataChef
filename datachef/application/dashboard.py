@@ -24,6 +24,10 @@ from pydantic import Field
 
 from datachef.application.artifacts import ArtifactFailure, gold_evidence_failure
 from datachef.application.models import StrictApplicationModel
+from datachef.application.question_charts import (
+    QuestionResolution,
+    compile_question_charts,
+)
 from datachef.contracts import (
     DiagnosticResolution,
     DownstreamUse,
@@ -108,7 +112,28 @@ class DashboardContext(StrictApplicationModel):
     downstream_use: DownstreamUse
     authored_questions: tuple[str, ...] = Field(default_factory=tuple)
     selected_questions: tuple[SuggestedQuestion, ...] = Field(default_factory=tuple)
+    question_resolutions: tuple[QuestionResolution, ...] = Field(default_factory=tuple)
     warnings: tuple[str, ...] = Field(default_factory=tuple)
+
+    @property
+    def authored_question_resolutions(self) -> tuple[QuestionResolution, ...]:
+        from datachef.application.question_charts import QuestionSource
+
+        return tuple(
+            item
+            for item in self.question_resolutions
+            if item.source is QuestionSource.AUTHORED
+        )
+
+    @property
+    def recommended_question_resolutions(self) -> tuple[QuestionResolution, ...]:
+        from datachef.application.question_charts import QuestionSource
+
+        return tuple(
+            item
+            for item in self.question_resolutions
+            if item.source is QuestionSource.AUTOMATIC
+        )
 
 
 class DashboardHandoff:
@@ -285,9 +310,14 @@ def _warnings(runtime: WorkflowRuntime) -> tuple[str, ...]:
     return tuple(messages)
 
 
-def _handoff_id(result_fingerprint: str, plan_id: str, qa_report_id: str) -> str:
+def _handoff_id(
+    result_fingerprint: str,
+    plan_id: str,
+    qa_report_id: str,
+    question_material: str = "",
+) -> str:
     digest = sha256()
-    for part in (result_fingerprint, plan_id, qa_report_id):
+    for part in (result_fingerprint, plan_id, qa_report_id, question_material):
         digest.update(part.encode("utf-8"))
         digest.update(b"\x00")
     return f"handoff-{digest.hexdigest()}"
@@ -318,6 +348,21 @@ def build_dashboard_handoff(
     assert runtime.gold_dataframe is not None
 
     gold = runtime.gold_dataframe
+    question_resolutions = compile_question_charts(
+        gold,
+        intent.questions,
+        selected_questions,
+        unavailable_columns=tuple(
+            column for column in runtime.raw_dataframe.columns if column not in gold.columns
+        ),
+    )
+    question_material = "\x00".join(
+        (
+            *intent.questions,
+            *(question.model_dump_json() for question in selected_questions),
+            *(resolution.model_dump_json() for resolution in question_resolutions),
+        )
+    )
     from crew.dashboard_agent.dashboard_agent import build_dashboard_spec
 
     gold_copy = gold.copy(deep=True)
@@ -333,6 +378,7 @@ def build_dashboard_handoff(
             result.result_fingerprint,
             plan.plan_id,
             report.qa_report_id,
+            question_material,
         ),
         dataset_id=identity.dataset_id,
         result_fingerprint=result.result_fingerprint,
@@ -341,6 +387,7 @@ def build_dashboard_handoff(
         downstream_use=intent.downstream_use,
         authored_questions=intent.questions,
         selected_questions=selected_questions,
+        question_resolutions=question_resolutions,
         warnings=_warnings(runtime),
     )
     return DashboardHandoff(context=context, gold=gold, spec=_retitled(spec))

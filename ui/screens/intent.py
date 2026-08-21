@@ -71,11 +71,15 @@ def render(controller: Any, state: Any) -> None:
         step=1.0,
         key=ui_state.ROW_LOSS_WIDGET,
     )
-    required_columns = st.multiselect(
-        "Columns that must survive",
+    keep_only_columns = st.multiselect(
+        "Keep only these columns",
         columns,
-        key=ui_state.REQUIRED_COLUMNS_WIDGET,
-        help="DataChef refuses any plan that would drop one of these columns.",
+        key=ui_state.KEEP_ONLY_COLUMNS_WIDGET,
+        help=(
+            "Optional. These are the columns you want in the final output. "
+            "DataChef turns every unselected column into an explicit "
+            "DROP_COLUMN operation for review."
+        ),
     )
     key_columns = st.multiselect(
         "Which column tells you two rows are the same record?",
@@ -128,7 +132,7 @@ def render(controller: Any, state: Any) -> None:
                 user_goal=goal or "",
                 downstream_use=downstream,
                 selected_key_columns=tuple(key_columns),
-                required_columns=tuple(required_columns),
+                required_columns=(),
                 acceptable_row_loss_pct=float(row_loss),
                 questions=tuple(
                     line.strip() for line in (authored or "").splitlines() if line.strip()
@@ -147,6 +151,7 @@ def render(controller: Any, state: Any) -> None:
                 intent,
                 requests,
                 selected_question_ids=tuple(selected_question_ids),
+                keep_only_columns=tuple(keep_only_columns),
             ),
         )
         if result.changed:

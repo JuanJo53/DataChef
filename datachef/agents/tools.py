@@ -15,11 +15,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pandas.api.types import is_bool_dtype, is_numeric_dtype
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from datachef.agents.trace import ToolInvocation
 from datachef.contracts import (
     CastColumnParameters,
+    ComputeColumnParameters,
+    ComputeOperator,
     DropColumnParameters,
     ImputeMissingParameters,
     ImputeStrategy,
@@ -48,6 +51,9 @@ MISSING_COLUMN = "MISSING_COLUMN"
 UNKNOWN_ISSUE = "UNKNOWN_DIAGNOSTIC_ISSUE"
 EMPTY_TARGETS = "EMPTY_TARGET_COLUMNS"
 INVALID_KEY = "INVALID_KEY"
+COMPUTE_NON_NUMERIC_INPUT = "COMPUTE_NON_NUMERIC_INPUT"
+COMPUTE_OUTPUT_COLLISION = "COMPUTE_OUTPUT_COLLISION"
+COMPUTE_ZERO_DENOMINATOR = "COMPUTE_ZERO_DENOMINATOR"
 
 # An unsupported-request note is the one place agent prose reaches a human, so
 # it is bounded at the tool boundary rather than trusted and truncated later.
@@ -108,10 +114,18 @@ class _ToolArgs(BaseModel):
 
 class _OperationArgs(_ToolArgs):
     diagnostic_issue_ids: list[str] = Field(default_factory=list)
+    user_requirement_ids: list[str] = Field(default_factory=list)
     rationale: str = Field(min_length=1)
     expected_effect: str = Field(min_length=1)
     risk: RiskLevel = RiskLevel.MEDIUM
     requires_human_approval: bool = True
+
+    @field_validator("diagnostic_issue_ids", "user_requirement_ids")
+    @classmethod
+    def validate_grounding_ids(cls, value: list[str]) -> list[str]:
+        if any(not item.strip() for item in value):
+            raise ValueError("grounding identifiers must contain non-whitespace text")
+        return value
 
 
 class TrimWhitespaceArgs(_OperationArgs):
@@ -166,6 +180,20 @@ class NormalizeNumericTextArgs(_OperationArgs):
     strip_thousands_separators: bool = True
 
 
+class ComputeColumnArgs(_OperationArgs):
+    left_column: str = Field(min_length=1)
+    right_column: str = Field(min_length=1)
+    output_column: str = Field(min_length=1)
+    operator: ComputeOperator
+
+    @field_validator("left_column", "right_column", "output_column")
+    @classmethod
+    def validate_column_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("column names must contain non-whitespace text")
+        return value
+
+
 class FinalizePlanArgs(_ToolArgs):
     summary: str = Field(min_length=1)
 
@@ -217,6 +245,7 @@ def propose(
     """Shared proposal path: guard, then append with a computed operation_id."""
 
     issue_ids = tuple(args.diagnostic_issue_ids)
+    requirement_ids = tuple(args.user_requirement_ids)
     reason: str | None = None
     if operation_type is not OperationType.DROP_DUPLICATE_ROWS and not target_columns:
         reason = EMPTY_TARGETS
@@ -226,7 +255,7 @@ def propose(
         reason = guard_dedup_keys(draft, target_columns)
     if reason is None:
         reason = guard_issues(draft, issue_ids)
-    if reason is None and not issue_ids:
+    if reason is None and not issue_ids and not requirement_ids:
         # The operation contract requires a link to an issue or a requirement.
         reason = UNKNOWN_ISSUE
     if reason is not None:
@@ -247,6 +276,7 @@ def propose(
         target_columns=target_columns,
         parameters=parameters,
         diagnostic_issue_ids=issue_ids,
+        user_requirement_ids=requirement_ids,
         rationale=args.rationale,
         expected_effect=args.expected_effect,
         risk=args.risk,
@@ -453,6 +483,11 @@ def build_operation_specs() -> tuple[tuple[str, OperationType, type[_OperationAr
             OperationType.NORMALIZE_NUMERIC_TEXT,
             NormalizeNumericTextArgs,
         ),
+        (
+            "propose_compute_column",
+            OperationType.COMPUTE_COLUMN,
+            ComputeColumnArgs,
+        ),
     )
 
 
@@ -558,12 +593,65 @@ def apply_operation_args(
             ),
             args=args,
         )
+    if isinstance(args, ComputeColumnArgs):
+        columns = (args.left_column, args.right_column)
+        reason = guard_columns(draft, columns)
+        dtype_by_column = {
+            column.name: column.dtype for column in draft.context.column_schema
+        }
+        if reason is None and any(
+            not is_numeric_dtype(dtype_by_column[column])
+            or is_bool_dtype(dtype_by_column[column])
+            for column in columns
+        ):
+            reason = COMPUTE_NON_NUMERIC_INPUT
+        if reason is None and args.output_column in draft.known_columns:
+            reason = COMPUTE_OUTPUT_COLLISION
+        if reason is None and args.operator is ComputeOperator.DIVIDE:
+            statistic = next(
+                (
+                    item
+                    for item in draft.context.column_statistics
+                    if item.column == args.right_column
+                ),
+                None,
+            )
+            if statistic is None or statistic.zero_count:
+                reason = COMPUTE_ZERO_DENOMINATOR
+        if reason is not None:
+            draft.record(
+                ToolInvocation(
+                    tool_name=tool_name,
+                    accepted=False,
+                    reason_code=reason,
+                    operation_type=OperationType.COMPUTE_COLUMN.value,
+                    target_columns=columns,
+                )
+            )
+            return {"accepted": False, "reason_code": reason}
+        return propose(
+            draft,
+            tool_name=tool_name,
+            operation_type=OperationType.COMPUTE_COLUMN,
+            target_columns=columns,
+            parameters=ComputeColumnParameters(
+                left_column=args.left_column,
+                right_column=args.right_column,
+                output_column=args.output_column,
+                operator=args.operator,
+            ),
+            args=args,
+        )
     raise TypeError("unsupported tool arguments")
 
 
 __all__ = [
     "ALIASED",
     "CastColumnArgs",
+    "ComputeColumnArgs",
+    "COMPUTE_NON_NUMERIC_INPUT",
+    "COMPUTE_OUTPUT_COLLISION",
+    "COMPUTE_ZERO_DENOMINATOR",
     "DeduplicateByKeysArgs",
     "DropDuplicateRowsArgs",
     "EMPTY_TARGETS",

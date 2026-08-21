@@ -9,7 +9,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from datachef.application import DataChefController, ScreenId
-from datachef.contracts import QAStatus, WorkflowStage
+from datachef.contracts import OperationType, QAStatus, WorkflowStage
 from datachef.workflow import WorkflowRuntime, execute_workflow
 from ui import state as ui_state
 
@@ -94,9 +94,12 @@ def _submit_intent(
     cast_columns: list[str] | None = None,
     row_loss: float = 50.0,
     goal: str | None = None,
+    questions: str | None = None,
 ) -> AppTest:
     if goal is not None:
         _widget(at, "text_area", ui_state.GOAL_WIDGET).set_value(goal)
+    if questions is not None:
+        _widget(at, "text_area", ui_state.QUESTIONS_WIDGET).set_value(questions)
     if key_columns:
         _widget(at, "multiselect", ui_state.KEY_COLUMNS_WIDGET).set_value(key_columns)
     if cast_columns:
@@ -428,6 +431,400 @@ def test_blocking_finding_disables_the_approve_control() -> None:
     reject = _widget(at, "button", ui_state.REJECT_WIDGET)
     assert reject.proto.disabled is False
     _assert_locked_down(at)
+
+
+def test_already_numeric_cast_is_visible_approvable_and_runs_as_an_empty_plan() -> None:
+    at = _app()
+    _upload_and_diagnose(at, CLEAN_CSV, "clean.csv")
+    _submit_intent(at, cast_columns=["amount"])
+    _prepare(at)
+
+    session = _controller(at).session
+    plan = session.workflow_runtime.state.transformation_plan
+    assert plan is not None
+    assert plan.operations == ()
+    assert any(
+        finding.code == "REQUEST_ALREADY_SATISFIED" and not finding.blocking
+        for finding in session.findings
+    )
+    assert not any(finding.code == "REQUEST_NOT_PLANNED" for finding in session.findings)
+    assert "REQUEST_ALREADY_SATISFIED" in _all_text(at)
+    assert _widget(at, "button", ui_state.APPROVE_WIDGET).proto.disabled is False
+
+    _approve_and_execute(at)
+
+    session = _controller(at).session
+    assert session.workflow_runtime.state.stage is WorkflowStage.QA_PASSED
+    assert session.workflow_runtime.gold_dataframe is not None
+    assert session.workflow_runtime.state.execution_result.operation_records == ()
+    assert "REQUEST_ALREADY_SATISFIED" in _all_text(at)
+    _assert_no_traceback(at)
+
+
+def test_walmart_drop_requests_and_already_numeric_cast_reach_results() -> None:
+    content = (
+        b"Store,Date,Weekly_Sales,Fuel_Price,CPI\n"
+        b"1,05-02-2010,1000.0,2.572,211.096\n"
+        b"1,12-02-2010,1100.0,2.548,211.242\n"
+        b"2,19-02-2010,1200.0,2.514,211.289\n"
+    )
+    at = _app()
+    _upload_and_diagnose(at, content, "walmart.csv")
+    _submit_intent(
+        at,
+        goal="Drop Date and CPI.",
+        cast_columns=["Fuel_Price"],
+        row_loss=0,
+    )
+    _prepare(at)
+
+    session = _controller(at).session
+    assert session.workflow_runtime.state.stage is WorkflowStage.AWAITING_APPROVAL
+    assert [
+        (operation.operation_type, operation.target_columns)
+        for operation in session.workflow_runtime.state.transformation_plan.operations
+    ] == [
+        (OperationType.DROP_COLUMN, ("Date",)),
+        (OperationType.DROP_COLUMN, ("CPI",)),
+    ]
+    assert any(
+        finding.code == "REQUEST_ALREADY_SATISFIED" and not finding.blocking
+        for finding in session.findings
+    )
+    assert not any(finding.blocking for finding in session.findings)
+
+    _approve_and_execute(at)
+
+    runtime = _controller(at).session.workflow_runtime
+    assert runtime.state.stage is WorkflowStage.QA_PASSED
+    assert "Date" not in runtime.gold_dataframe
+    assert "CPI" not in runtime.gold_dataframe
+    assert len(at.download_button) == 7
+    _assert_no_traceback(at)
+
+
+def test_accounting_currency_normalization_reaches_pass_and_artifacts() -> None:
+    content = (
+        b'Profit,Sales,Postal Code\n'
+        b'"($5)","$16",10001\n'
+        b'"($2,574)","$2,574",10002\n'
+        b'"-$65","$0",10003\n'
+    )
+    at = _app()
+    _upload_and_diagnose(at, content, "superstore.csv")
+    _submit_intent(
+        at,
+        goal="Convert Profit and Sales to numeric. Drop Postal Code.",
+        cast_columns=["Profit", "Sales"],
+        row_loss=0,
+    )
+    _prepare(at)
+    _approve_and_execute(at)
+
+    runtime = _controller(at).session.workflow_runtime
+    assert runtime.state.stage is WorkflowStage.QA_PASSED
+    assert list(runtime.gold_dataframe["Profit"]) == [-5, -2574, -65]
+    assert list(runtime.gold_dataframe["Sales"]) == [16, 2574, 0]
+    assert "Postal Code" not in runtime.gold_dataframe
+    assert len(at.download_button) == 7
+    _assert_no_traceback(at)
+
+
+def test_dashboard_renders_question_grounded_charts_before_legacy_recommendations() -> None:
+    at = _app()
+    _upload_and_diagnose(at, CSV, "orders.csv")
+    _submit_intent(
+        at,
+        key_columns=["order_id"],
+        row_loss=50.0,
+        questions="Show the trend of amount over ordered_on",
+    )
+    _prepare(at)
+    _approve_and_execute(at)
+    _widget(at, "button", ui_state.CONTINUE_TO_DASHBOARD_WIDGET).click()
+    at.run()
+
+    text = _all_text(at)
+    assert "Charts answering your questions" in text
+    assert "Other recommended charts" in text
+    assert "could not be charted" not in text
+    handoff = _controller(at).build_dashboard_handoff()
+    assert handoff.context.question_resolutions[0].chart.chart_type.value == "LINE"
+    assert len(at.get("plotly_chart")) >= 1
+    _assert_no_traceback(at)
+
+
+def test_dashboard_keeps_an_ambiguous_business_question_visible() -> None:
+    at = _app()
+    _upload_and_diagnose(at, CSV, "orders.csv")
+    _submit_intent(
+        at,
+        key_columns=["order_id"],
+        row_loss=50.0,
+        questions="What should I know?",
+    )
+    _prepare(at)
+    _approve_and_execute(at)
+    _widget(at, "button", ui_state.CONTINUE_TO_DASHBOARD_WIDGET).click()
+    at.run()
+
+    text = _all_text(at)
+    assert "Question 1 could not be answered" in text
+    assert "State a trend, distribution, relationship, comparison, or aggregation" in text
+    assert "What should I know?" in [item.value for item in at.text]
+    assert "Other recommended charts" in text
+    _assert_no_traceback(at)
+
+
+def test_ml_dashboard_separates_authored_questions_and_resolves_ranking_scatter() -> None:
+    rows = [
+        "asin,title,stars,price,category_id,isBestSeller,boughtInLastMonth\n"
+    ]
+    rows.extend(
+        (
+            f"A{index:04d},"
+            f"{'' if index < 250 else 'Common title'},"
+            f"{'' if index % 10 == 0 else 3.0 + index % 3},"
+            f"{'' if index % 11 == 0 else 10.0 + index},"
+            f"104,False,{'' if index < 250 else 0}\n"
+        )
+        for index in range(500)
+    )
+    at = _app()
+    _upload_and_diagnose(at, "".join(rows).encode("utf-8"), "ml-products.csv")
+    suggestions = _widget(at, "multiselect", ui_state.SUGGESTED_QUESTIONS_WIDGET)
+    missingness = next(
+        option for option in suggestions.options if "missing" in option.casefold()
+    )
+    suggestions.set_value([missingness])
+    _submit_intent(
+        at,
+        goal=(
+            "Prepare this table for ML modelling to predict the price column. "
+            "If title is over 40% missing and there is no mode drop it, otherwise "
+            "use the mode to impute title, impute stars using the mean, impute "
+            "price using the median, drop category_id, if boughtInLastMonth is "
+            "over 40% null and has zero values drop it, finally drop duplicate "
+            "values based on asin, if there are columns with one distinct value "
+            "drop them"
+        ),
+        questions=(
+            "What titles have the highest prices?\n"
+            "What's the relationship between price and stars?"
+        ),
+    )
+    _prepare(at)
+    plan = _controller(at).session.workflow_runtime.state.transformation_plan
+    assert [
+        (operation.operation_type, operation.target_columns)
+        for operation in plan.operations
+    ] == [
+        (OperationType.IMPUTE_MISSING, ("title",)),
+        (OperationType.IMPUTE_MISSING, ("stars",)),
+        (OperationType.IMPUTE_MISSING, ("price",)),
+        (OperationType.DROP_COLUMN, ("category_id",)),
+        (OperationType.DROP_COLUMN, ("boughtInLastMonth",)),
+        (OperationType.DROP_COLUMN, ("isBestSeller",)),
+        (OperationType.DEDUPLICATE_BY_KEYS, ("asin",)),
+    ]
+    _approve_and_execute(at)
+    assert len(at.download_button) == 7
+    _widget(at, "button", ui_state.CONTINUE_TO_DASHBOARD_WIDGET).click()
+    at.run()
+
+    handoff = _controller(at).build_dashboard_handoff()
+    authored = handoff.context.authored_question_resolutions
+    recommended = handoff.context.recommended_question_resolutions
+    assert len(authored) == 2
+    assert len(recommended) == 1
+    assert authored[0].chart.chart_type.value == "BAR"
+    assert authored[0].chart.x_column == "title"
+    assert authored[0].chart.y_column == "price"
+    assert authored[0].chart.ranking.value == "DESCENDING"
+    assert authored[1].chart.chart_type.value == "SCATTER"
+    assert (authored[1].chart.x_column, authored[1].chart.y_column) == (
+        "price",
+        "stars",
+    )
+    text = _all_text(at)
+    assert "Charts answering your questions" in text
+    assert "Other recommended charts / diagnostics" in text
+    assert "Question 1 · Bar" in text
+    assert "Question 2 · Scatter" in text
+    assert "Question 3" not in text
+    assert "Recommendation 1" in text
+    _assert_no_traceback(at)
+
+
+def test_keep_only_control_produces_explicit_approved_drops_and_exact_gold_schema() -> None:
+    at = _app()
+    content = b"metric_a,metric_b,metric_c,metric_d\n1,2,3,4\n5,6,7,8\n"
+    _upload_and_diagnose(at, content, "metrics.csv")
+    _widget(at, "multiselect", ui_state.KEEP_ONLY_COLUMNS_WIDGET).set_value(
+        ["metric_a", "metric_b"]
+    )
+    _submit_intent(at)
+    _prepare(at)
+
+    session = _controller(at).session
+    plan = session.workflow_runtime.state.transformation_plan
+    assert plan is not None
+    assert [
+        (operation.operation_type, operation.target_columns)
+        for operation in plan.operations
+        if operation.operation_type is OperationType.DROP_COLUMN
+    ] == [
+        (OperationType.DROP_COLUMN, ("metric_c",)),
+        (OperationType.DROP_COLUMN, ("metric_d",)),
+    ]
+    assert _widget(at, "button", ui_state.APPROVE_WIDGET).proto.disabled is False
+
+    _approve_and_execute(at)
+
+    runtime = _controller(at).session.workflow_runtime
+    assert runtime.state.stage is WorkflowStage.QA_PASSED
+    assert list(runtime.gold_dataframe.columns) == ["metric_a", "metric_b"]
+    _assert_no_traceback(at)
+
+
+def test_compute_column_objective_runs_through_approval_to_verified_gold() -> None:
+    at = _app()
+    content = b"quantity,unit_price,category\n2,4.5,A\n3,10.0,B\n"
+    _upload_and_diagnose(at, content, "sales.csv")
+    _submit_intent(
+        at,
+        goal="Create a new column called total by multiplying quantity by unit_price.",
+    )
+    _prepare(at)
+
+    plan = _controller(at).session.workflow_runtime.state.transformation_plan
+    assert plan is not None
+    compute = [
+        operation
+        for operation in plan.operations
+        if operation.operation_type is OperationType.COMPUTE_COLUMN
+    ]
+    assert len(compute) == 1
+    assert compute[0].parameters.output_column == "total"
+    assert _widget(at, "button", ui_state.APPROVE_WIDGET).proto.disabled is False
+
+    _approve_and_execute(at)
+
+    runtime = _controller(at).session.workflow_runtime
+    assert runtime.state.stage is WorkflowStage.QA_PASSED
+    assert runtime.gold_dataframe["total"].tolist() == [9.0, 30.0]
+    assert len(at.download_button) == 7
+    _assert_no_traceback(at)
+
+
+def test_keep_only_with_currency_casts_retains_profit_and_sales() -> None:
+    content = (
+        b"Postal Code,Profit,Sales,Profit  From Sales w/o discount,Segment\n"
+        b"100,$1,$10,9,A\n"
+        b"200,($2),$20,18,B\n"
+    )
+    at = _app()
+    _upload_and_diagnose(at, content, "compound-sales.csv")
+    _widget(at, "multiselect", ui_state.KEEP_ONLY_COLUMNS_WIDGET).set_value(
+        ["Profit", "Sales", "Segment"]
+    )
+    _submit_intent(
+        at,
+        goal="Turn Profit and Sales to numeric",
+        cast_columns=["Profit", "Sales"],
+        row_loss=0,
+    )
+    _prepare(at)
+
+    plan = _controller(at).session.workflow_runtime.state.transformation_plan
+    drops = [
+        operation.target_columns
+        for operation in plan.operations
+        if operation.operation_type is OperationType.DROP_COLUMN
+    ]
+    assert drops == [
+        ("Postal Code",),
+        ("Profit  From Sales w/o discount",),
+    ]
+    assert ("Profit",) not in drops and ("Sales",) not in drops
+
+    _approve_and_execute(at)
+    runtime = _controller(at).session.workflow_runtime
+    assert runtime.state.stage is WorkflowStage.QA_PASSED
+    assert list(runtime.gold_dataframe.columns) == ["Profit", "Sales", "Segment"]
+    assert list(runtime.gold_dataframe["Profit"]) == [1, -2]
+    assert list(runtime.gold_dataframe["Sales"]) == [10, 20]
+    assert len(at.download_button) == 7
+    _assert_no_traceback(at)
+
+
+def test_generic_single_distinct_objective_drops_every_eligible_constant() -> None:
+    content = (
+        b"row_id,constant_a,constant_b,varying\n"
+        b"1,x,7,10\n2,x,7,20\n3,x,7,30\n"
+    )
+    at = _app()
+    _upload_and_diagnose(at, content, "constants.csv")
+    _submit_intent(
+        at,
+        goal="If there are columns with one distinct value, drop them",
+        row_loss=0,
+    )
+    _prepare(at)
+
+    plan = _controller(at).session.workflow_runtime.state.transformation_plan
+    assert [
+        operation.target_columns
+        for operation in plan.operations
+        if operation.operation_type is OperationType.DROP_COLUMN
+    ] == [("constant_a",), ("constant_b",)]
+
+    _approve_and_execute(at)
+    runtime = _controller(at).session.workflow_runtime
+    assert runtime.state.stage is WorkflowStage.QA_PASSED
+    assert list(runtime.gold_dataframe.columns) == ["row_id", "varying"]
+    assert len(at.download_button) == 7
+    _assert_no_traceback(at)
+
+
+def test_walmart_ranking_and_weekday_questions_render_from_verified_gold() -> None:
+    content = (
+        b"Store,Date,Weekly_Sales,CPI\n"
+        b"1,2026-08-17,100,200\n"
+        b"1,2026-08-18,150,201\n"
+        b"2,2026-08-24,300,202\n"
+    )
+    at = _app()
+    _upload_and_diagnose(at, content, "walmart-questions.csv")
+    _submit_intent(
+        at,
+        goal="Drop CPI",
+        row_loss=0,
+        questions=(
+            "What stores have the most weekly sales?\n"
+            "On what day of the week do we have the most sales?\n"
+            "Which stores have the highest CPI?"
+        ),
+    )
+    _prepare(at)
+    _approve_and_execute(at)
+    _widget(at, "button", ui_state.CONTINUE_TO_DASHBOARD_WIDGET).click()
+    at.run()
+
+    handoff = _controller(at).build_dashboard_handoff()
+    authored = handoff.context.authored_question_resolutions
+    assert [item.status.value for item in authored] == [
+        "RESOLVED",
+        "RESOLVED",
+        "QUESTION_UNSUPPORTED",
+    ]
+    assert authored[0].chart.x_column == "Store"
+    assert authored[0].chart.y_column == "Weekly_Sales"
+    assert authored[0].chart.aggregation.value == "SUM"
+    assert authored[1].chart.category_transform.value == "DAY_OF_WEEK"
+    assert authored[2].reason_code == "QUESTION_COLUMN_UNAVAILABLE"
+    assert len(at.get("plotly_chart")) >= 2
+    _assert_no_traceback(at)
 
 
 def test_full_reset_clears_state_and_rotates_the_uploader_key() -> None:
@@ -786,8 +1183,9 @@ def test_stage_indicator_renders_all_seven_screens_and_marks_the_current_one() -
         "7 · Dashboard",
     ):
         assert label in sidebar_text
-    assert "**➡️ 1 · Upload**" in sidebar_text
-    assert "◻️ 7 · Dashboard" in sidebar_text
+    assert 'class="stage-current"' in sidebar_text
+    assert "●" in sidebar_text
+    assert 'class="stage-pending"' in sidebar_text
     # Quality assurance is not a place the user goes.
     assert "Quality" not in sidebar_text
     _assert_no_traceback(at)
@@ -821,18 +1219,19 @@ def test_diagnostics_is_screen_two_and_shows_the_deterministic_evidence() -> Non
 
     session = _controller(at).session
     assert session.screen.value == "DIAGNOSE"
-    assert "2 · Diagnostics" in [header.value for header in at.header]
+    sidebar_text = " ".join(item.value for item in at.sidebar.markdown)
+    assert 'class="stage-current"' in sidebar_text
+    assert "2 · Diagnostics" in sidebar_text
     report = session.display_diagnostic_report
-    labels = {item.label: item.value for item in at.metric}
-    assert labels["Rows"] == f"{report.dataset_identity.row_count:,}"
-    assert labels["Columns"] == f"{report.dataset_identity.column_count:,}"
-    assert labels["Duplicate rows"] == f"{report.duplicate_row_count:,}"
-    assert labels["Complete values"] == (
-        f"{report.legacy_evidence.completeness_pct:.2f}%"
-    )
     text = _all_text(at)
-    assert "Every column as it arrived" in text
-    assert "Duplicate keys" in text
+    assert "Data health" in text
+    assert "Detected issues" in text
+    assert "View column details" in [item.label for item in at.expander]
+    assert len(at.dataframe) == 1
+    profiles = at.dataframe[0].value
+    assert profiles["Column"].tolist() == [
+        profile.name for profile in report.column_profiles
+    ]
     # It is a read of existing evidence: no plan, no workflow, no command.
     assert session.workflow_runtime is None
     assert session.command_history == ()
@@ -909,16 +1308,17 @@ def test_upload_preview_is_opt_in_capped_and_evidence_free() -> None:
     _assert_no_traceback(at)
 
 
-def test_key_question_is_plain_language_and_follows_required_columns() -> None:
+def test_objective_exposes_keep_only_without_duplicate_required_column_concept() -> None:
     at = _app()
     _upload_and_diagnose(at, DEMO_CSV, "orders.csv")
 
     labels = [str(item.label) for item in at.multiselect]
-    required_label = "Columns that must survive"
+    keep_only_label = "Keep only these columns"
     key_label = "Which column tells you two rows are the same record?"
-    assert required_label in labels
+    assert "Columns that must survive" not in labels
+    assert keep_only_label in labels
     assert key_label in labels
-    assert labels.index(required_label) < labels.index(key_label)
+    assert labels.index(keep_only_label) < labels.index(key_label)
     assert "Key columns" not in labels
     _assert_no_traceback(at)
 
@@ -940,7 +1340,8 @@ def test_dashboard_questions_sit_in_their_own_section_below_the_cleaning_fields(
     assert requests_heading < questions_heading
 
     multiselects = [str(item.label) for item in at.multiselect]
-    required_at = multiselects.index("Columns that must survive")
+    assert "Columns that must survive" not in multiselects
+    keep_only_at = multiselects.index("Keep only these columns")
     key_at = multiselects.index("Which column tells you two rows are the same record?")
     cast_at = multiselects.index("Cast these columns to numeric")
     suggested_at = multiselects.index(
@@ -949,7 +1350,7 @@ def test_dashboard_questions_sit_in_their_own_section_below_the_cleaning_fields(
     # Cleaning fields keep their order; both question inputs come last. The
     # typed dedup request is gone: the key-column question above asks for it.
     assert "Deduplicate rows by these keys" not in multiselects
-    assert required_at < key_at < cast_at < suggested_at
+    assert keep_only_at < key_at < cast_at < suggested_at
     text_areas = [str(item.label) for item in at.text_area]
     assert text_areas[-1] == "Your analytical questions (one per line)"
     _assert_no_traceback(at)

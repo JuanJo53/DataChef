@@ -40,7 +40,7 @@ JSON_MODE_WIDGET = "datachef_w_json_mode"
 GOAL_WIDGET = "datachef_w_goal"
 DOWNSTREAM_WIDGET = "datachef_w_downstream"
 KEY_COLUMNS_WIDGET = "datachef_w_key_columns"
-REQUIRED_COLUMNS_WIDGET = "datachef_w_required_columns"
+KEEP_ONLY_COLUMNS_WIDGET = "datachef_w_keep_only_columns"
 ROW_LOSS_WIDGET = "datachef_w_row_loss"
 PII_WIDGET = "datachef_w_pii"
 QUESTIONS_WIDGET = "datachef_w_questions"
@@ -49,6 +49,7 @@ CAST_REQUEST_WIDGET = "datachef_w_cast_requests"
 DEDUP_REQUEST_WIDGET = "datachef_w_dedup_requests"
 REVISE_ROW_LOSS_WIDGET = "datachef_w_revise_row_loss"
 REVISE_KEY_COLUMNS_WIDGET = "datachef_w_revise_key_columns"
+REVISE_KEEP_ONLY_COLUMNS_WIDGET = "datachef_w_revise_keep_only_columns"
 REVISE_CAST_REQUEST_WIDGET = "datachef_w_revise_cast_requests"
 REVISE_DEDUP_REQUEST_WIDGET = "datachef_w_revise_dedup_requests"
 REVISE_SUBMIT_WIDGET = "datachef_w_revise_submit"
@@ -245,6 +246,7 @@ __all__ = [
     "HUMAN_COMMAND",
     "JSON_MODE_WIDGET",
     "KEY_COLUMNS_WIDGET",
+    "KEEP_ONLY_COLUMNS_WIDGET",
     "LAST_RESULT",
     "NAMESPACE",
     "PII_WIDGET",
@@ -254,12 +256,12 @@ __all__ = [
     "PREVIEW_WIDGET",
     "QUESTIONS_WIDGET",
     "REJECT_WIDGET",
-    "REQUIRED_COLUMNS_WIDGET",
     "RESET_REQUESTED",
     "RESET_WIDGET",
     "REVISE_CAST_REQUEST_WIDGET",
     "REVISE_DEDUP_REQUEST_WIDGET",
     "REVISE_KEY_COLUMNS_WIDGET",
+    "REVISE_KEEP_ONLY_COLUMNS_WIDGET",
     "REVISE_ROW_LOSS_WIDGET",
     "REVISE_SUBMIT_WIDGET",
     "ROW_LOSS_WIDGET",

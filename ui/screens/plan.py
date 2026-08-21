@@ -92,6 +92,14 @@ def _render_revise_form(controller: Any, state: Any, session: Any) -> None:
             default=[column for column in intent.selected_key_columns if column in columns],
             key=ui_state.REVISE_KEY_COLUMNS_WIDGET,
         )
+        keep_only_columns = st.multiselect(
+            "Keep only these columns",
+            columns,
+            default=[
+                column for column in session.keep_only_columns if column in columns
+            ],
+            key=ui_state.REVISE_KEEP_ONLY_COLUMNS_WIDGET,
+        )
         cast_columns = st.multiselect(
             "Cast these columns to numeric",
             columns,
@@ -130,6 +138,7 @@ def _render_revise_form(controller: Any, state: Any, session: Any) -> None:
                 revised,
                 requests,
                 selected_question_ids=tuple(session.selected_question_ids),
+                keep_only_columns=tuple(keep_only_columns),
             ),
         )
         if result.changed:

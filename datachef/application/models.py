@@ -19,6 +19,7 @@ from datachef.contracts import (
     ImputeStrategy,
     RequestedOperation,
     CastColumnParameters,
+    ComputeColumnParameters,
     CastTarget,
     DatasetIdentity,
     DeduplicateByKeysParameters,
@@ -203,7 +204,8 @@ RequestedParameters = Annotated[
     CastColumnParameters
     | DeduplicateByKeysParameters
     | DropColumnParameters
-    | ImputeMissingParameters,
+    | ImputeMissingParameters
+    | ComputeColumnParameters,
     Field(discriminator="kind"),
 ]
 
@@ -264,6 +266,14 @@ class RequestedTransformation(StrictApplicationModel):
                 and self.parameters.constant_value is None
             ):
                 raise ValueError("constant imputation requests require a constant")
+        elif self.operation_type is OperationType.COMPUTE_COLUMN:
+            if not isinstance(self.parameters, ComputeColumnParameters):
+                raise ValueError("computed-column requests require compute parameters")
+            if self.target_columns != (
+                self.parameters.left_column,
+                self.parameters.right_column,
+            ):
+                raise ValueError("computed-column targets must equal the two inputs")
         else:
             raise ValueError("requested operation is not available offline")
         return self

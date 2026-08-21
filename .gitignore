@@ -45,6 +45,7 @@ pipeline_transformacion.py
 
 # Test caches
 .pytest_cache/
+test-datasets/
 
 # IDE files
 .vscode/

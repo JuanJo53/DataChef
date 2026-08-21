@@ -77,7 +77,7 @@ def _render_source_summary(controller: Any, session: Any) -> None:
     left, middle, right = st.columns(3, gap="medium")
 
     with left:
-        st.markdown(
+        st.html(
             textwrap.dedent(
                 f"""
                 <div class="metric-card metric-purple">
@@ -88,12 +88,11 @@ def _render_source_summary(controller: Any, session: Any) -> None:
                     </div>
                 </div>
                 """
-            ),
-            unsafe_allow_html=True,
+            )
         )
 
     with middle:
-        st.markdown(
+        st.html(
             textwrap.dedent(
                 f"""
                 <div class="metric-card metric-blue">
@@ -104,12 +103,11 @@ def _render_source_summary(controller: Any, session: Any) -> None:
                     </div>
                 </div>
                 """
-            ),
-            unsafe_allow_html=True,
+            )
         )
 
     with right:
-        st.markdown(
+        st.html(
             textwrap.dedent(
                 f"""
                 <div class="metric-card metric-green">
@@ -120,8 +118,7 @@ def _render_source_summary(controller: Any, session: Any) -> None:
                     </div>
                 </div>
                 """
-            ),
-            unsafe_allow_html=True,
+            )
         )
 
     # Opt-in and off by default. A button rather than a second toggle so this

@@ -334,6 +334,46 @@ def _numeric_text_noise_issues(dataframe: pd.DataFrame) -> list[DiagnosticIssue]
     return found
 
 
+_DATE_ROLE_NAME = re.compile(
+    r"(?:^|[^a-z])(?:date|datetime|timestamp)(?:$|[^a-z])|(?:date|datetime|timestamp)$",
+    re.IGNORECASE,
+)
+_DIRECT_PII_NAME = re.compile(
+    r"(?:birth|dob|name|email|mail|phone|tel|ssn|dni|passport|address|card)",
+    re.IGNORECASE,
+)
+
+
+def _is_value_based_date_pii_false_positive(
+    dataframe: pd.DataFrame,
+    column: str,
+    *,
+    legacy_pii: bool,
+) -> bool:
+    """Narrow one legacy phone-pattern false positive without weakening PII names.
+
+    The legacy detector treats dash-separated dates such as ``05-02-2010`` as
+    phone numbers.  We suppress that value-only hit only when the schema name
+    explicitly declares a date role, the name itself carries no direct PII
+    marker, and at least 90% of a bounded non-null sample parses as dates.
+    Birth/DOB and other explicitly sensitive labels remain PII regardless of
+    parseability.
+    """
+
+    if not legacy_pii or not _DATE_ROLE_NAME.search(column):
+        return False
+    if _DIRECT_PII_NAME.search(column):
+        return False
+    sample = dataframe[column].dropna().astype(str).str.strip().head(50)
+    if sample.empty:
+        return False
+    try:
+        parsed = pd.to_datetime(sample, errors="coerce", format="mixed")
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return float(parsed.notna().mean()) >= 0.9
+
+
 def diagnose_raw_dataframe(
     dataframe: pd.DataFrame,
     *,
@@ -343,6 +383,15 @@ def diagnose_raw_dataframe(
 
     identity = identify_dataset(dataframe)
     legacy_report = build_ingestion_report(dataframe.copy(deep=True))
+    date_pii_false_positives = {
+        str(item["name"])
+        for item in legacy_report["columns"]
+        if _is_value_based_date_pii_false_positive(
+            dataframe,
+            str(item["name"]),
+            legacy_pii=bool(item["is_pii"]),
+        )
+    }
     profiles = tuple(
         ColumnProfile(
             name=str(item["name"]),
@@ -353,11 +402,22 @@ def diagnose_raw_dataframe(
             unique_count=int(item["unique"]),
             zero_count=int(item["zero_count"]),
             is_primary_key_candidate=bool(item["is_pk_candidate"]),
-            possible_pii=bool(item["is_pii"]),
+            possible_pii=(
+                bool(item["is_pii"])
+                and str(item["name"]) not in date_pii_false_positives
+            ),
         )
         for item in legacy_report["columns"]
     )
-    issues = [_legacy_issue_to_contract(item) for item in legacy_report["issues"]]
+    issues = [
+        converted
+        for item in legacy_report["issues"]
+        for converted in (_legacy_issue_to_contract(item),)
+        if not (
+            converted.kind is DiagnosticIssueKind.POSSIBLE_PII
+            and set(converted.affected_columns).issubset(date_pii_false_positives)
+        )
+    ]
     issues.extend(_numeric_text_noise_issues(dataframe))
     missing_selected_keys = tuple(
         column for column in selected_key_columns if column not in dataframe.columns
