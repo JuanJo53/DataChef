@@ -15,7 +15,7 @@ import streamlit as st
 LOGO_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "img",
-    "Gemini_Generated_Image_adhg9madhg9madhg.png",
+    "logo.png",
 )
 
 # Importaciones de los Agentes del Equipo
